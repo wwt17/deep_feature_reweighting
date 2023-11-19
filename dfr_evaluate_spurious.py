@@ -163,6 +163,21 @@ def split_val_set(all_embeddings, all_y, all_g, n_groups, n_val=None, group_bala
     return (x_train, y_train, g_train), (x_val, y_val, g_val)
 
 
+def evaluate_on_dataset(model, dataset, n_groups):
+    """Evaluate model on dataset.
+    Args:
+        model: a LogisticRegression model
+        dataset: (x, y, g)
+    Returns:
+        preds, corrects, group_accs
+    """
+    x, y, g = dataset
+    preds = model.predict(x)
+    corrects = preds == y
+    group_accs = [corrects[g == g_id].mean() for g_id in range(n_groups)]
+    return preds, corrects, group_accs
+
+
 def dfr_tune(
         get_datasets, n_groups, scaler="train", num_retrains=1,
         learn_class_weights=False, max_iter=100):
@@ -194,14 +209,12 @@ def dfr_tune(
                     penalty=REG, C=c, solver="liblinear",
                     class_weight=class_weight, max_iter=max_iter)
                 logreg.fit(x_train, y_train)
-                preds_val = logreg.predict(x_val)
-                correct = preds_val == y_val
-                group_accs = np.array(
-                    [correct[g_val == g].mean()
-                     for g in range(n_groups)])
+                preds_val, corrects, group_accs = evaluate_on_dataset(
+                    logreg, (x_val, y_val, g_val), n_groups)
+                group_accs = np.array(group_accs)
                 worst_acc = np.min(group_accs)
                 worst_accs[c, class_weight[0], class_weight[1]] += worst_acc
-                print(f"{c=} {class_weight=} {worst_acc=:.4f} {group_accs=}")
+                print(f"{c=:<4} class_weight={str(class_weight):<19} {worst_acc=:.4f} {group_accs=}")
 
     ks, vs = list(worst_accs.keys()), list(worst_accs.values())
     best_hypers = ks[np.argmax(vs)]
@@ -239,16 +252,12 @@ def dfr_eval(
     logreg.coef_ = np.mean(coefs, axis=0)
     logreg.intercept_ = np.mean(intercepts, axis=0)
 
-    preds_test = logreg.predict(x_test)
-    preds_train = logreg.predict(x_train)
-    test_correct = preds_test == y_test
-    test_accs = [test_correct[g_test == g].mean()
-                 for g in range(n_groups)]
-    test_mean_acc = test_correct.mean()
-    train_correct = preds_train == y_train
-    train_accs = [train_correct[g_train == g].mean()
-                  for g in range(n_groups)]
-    return test_accs, test_mean_acc, train_accs
+    preds_test, test_corrects, test_group_accs = evaluate_on_dataset(
+        logreg, (x_test, y_test, g_test), n_groups)
+    test_mean_acc = test_corrects.mean()
+    preds_train, train_corrects, train_group_accs = evaluate_on_dataset(
+        logreg, (x_train, y_train, g_train), n_groups)
+    return test_group_accs, test_mean_acc, train_group_accs
 
 
 if __name__ == '__main__':
@@ -290,7 +299,7 @@ if __name__ == '__main__':
 
     # Load model
     n_classes = trainset.n_classes
-    model = torchvision.models.resnet50(pretrained=False)
+    model = torchvision.models.resnet50(weights=None)
     d = model.fc.in_features
     model.fc = torch.nn.Linear(d, n_classes)
     model.load_state_dict(torch.load(args.ckpt_path))
