@@ -5,6 +5,7 @@ import torchvision
 from torch.utils.tensorboard import SummaryWriter
 
 import numpy as np
+import scipy as sp
 import os
 import tqdm
 import argparse
@@ -163,6 +164,15 @@ def split_val_set(all_embeddings, all_y, all_g, n_groups, n_val=None, group_bala
     return (x_train, y_train, g_train), (x_val, y_val, g_val)
 
 
+def get_conf_acc(logits, target):
+    probs = sp.special.softmax(logits, axis=-1)
+    pred_ = np.argmax(probs, axis=-1, keepdims=True)
+    pred = pred_.squeeze(axis=-1)
+    conf = np.take_along_axis(probs, pred_, axis=-1).squeeze(axis=-1)
+    acc = pred == target
+    return conf, acc
+
+
 def get_ece(conf, acc, n_bins=10, verbose=True):
     assert len(conf) == len(acc)
     assert np.all((conf > 0) & (conf <= 1))
@@ -201,7 +211,7 @@ def evaluate_on_dataset(
 
     if with_ece:
         pred_probs = model.predict_proba(x)
-        conf = pred_probs[np.arange(len(pred_probs)), preds]  # confidence
+        conf = np.take_along_axis(pred_probs, np.expand_dims(preds, axis=-1), axis=-1).squeeze(axis=-1)  # confidence
         ece = get_ece(conf, corrects, n_bins=n_bins, verbose=verbose)
         group_eces = [
             get_ece(conf[g == g_id], corrects[g == g_id], n_bins=n_bins,
@@ -323,6 +333,7 @@ if __name__ == '__main__':
         for split in ["train", "val", "test"]
     }
     trainset, valset, testset = datasets.values()
+    n_groups = trainset.n_groups
 
     loader_kwargs = {'batch_size': args.batch_size,
                     'num_workers': 4, 'pin_memory': True,
@@ -347,10 +358,22 @@ if __name__ == '__main__':
     # Evaluate model
     print("Base Model")
     get_yp_func = partial(get_y_p, n_places=trainset.n_places)
-    base_model_results = {
-        split: evaluate(model, loader, get_yp_func)
-        for split, loader in loaders.items()
-    }
+    base_model_results = {}
+    for split, loader in loaders.items():
+        results, logits = evaluate(model, loader, get_yp_func, return_logits=True)
+        y, g = loader.dataset.y_array, loader.dataset.group_array
+        conf, acc = get_conf_acc(logits, y)
+        mean_accuracy = acc.mean()
+        np.testing.assert_approx_equal(mean_accuracy, results["mean_accuracy"])
+        ece = get_ece(conf, acc)
+        group_eces = [
+            get_ece(conf[g == g_id], acc[g == g_id])
+            for g_id in range(n_groups)]
+        results["calibration"] = {
+            "ece": ece,
+            "group_eces": group_eces,
+        }
+        base_model_results[split] = results
     print(json.dumps(base_model_results, indent=INDENT))
     print()
 
@@ -391,7 +414,6 @@ if __name__ == '__main__':
 
     scaler = StandardScaler()
     scaler.fit(all_embeddings["train"])
-    n_groups = np.max([np.max(g) for g in all_g.values()]) + 1
 
     # DFR on validation
     print("DFR on validation")
