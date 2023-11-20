@@ -102,11 +102,16 @@ def get_results(acc_groups, get_yp_func):
     return results
 
 
-def evaluate(model, loader, get_yp_func, multitask=False, predict_place=False):
+def evaluate(model, loader, get_yp_func, multitask=False, predict_place=False, return_logits=False):
     model.eval()
+
     acc_groups = {g_idx : AverageMeter() for g_idx in range(loader.dataset.n_groups)}
+    if return_logits:
+        all_logits = []
     if multitask:
         acc_place_groups = {g_idx: AverageMeter() for g_idx in range(trainset.n_groups)}
+        if return_logits:
+            all_logits_place = []
 
     with torch.no_grad():
         for x, y, g, p in tqdm.tqdm(loader):
@@ -118,12 +123,25 @@ def evaluate(model, loader, get_yp_func, multitask=False, predict_place=False):
             if multitask:
                 logits, logits_place = logits
                 update_dict(acc_place_groups, p, g, logits_place)
+                if return_logits:
+                    all_logits_place.append(logits_place.detach().cpu().numpy())
 
             update_dict(acc_groups, y, g, logits)
+            if return_logits:
+                all_logits.append(logits.detach().cpu().numpy())
+
     model.train()
+
+    ret = (get_results(acc_groups, get_yp_func),)
     if multitask:
-        return get_results(acc_groups, get_yp_func), get_results(acc_place_groups, get_yp_func)
-    return get_results(acc_groups, get_yp_func)
+        ret += (get_results(acc_place_groups, get_yp_func),)
+    if return_logits:
+        all_logits = np.concatenate(all_logits)
+        ret += (all_logits,)
+        if multitask:
+            all_logits_place = np.concatenate(all_logits_place)
+            ret += (all_logits_place,)
+    return ret[0] if len(ret) == 1 else ret
 
 
 class MultiTaskHead(nn.Module):
