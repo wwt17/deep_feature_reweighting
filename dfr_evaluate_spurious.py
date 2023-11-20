@@ -163,7 +163,29 @@ def split_val_set(all_embeddings, all_y, all_g, n_groups, n_val=None, group_bala
     return (x_train, y_train, g_train), (x_val, y_val, g_val)
 
 
-def evaluate_on_dataset(model, dataset, n_groups):
+def get_ece(conf, acc, n_bins=10, verbose=True):
+    assert len(conf) == len(acc)
+    assert np.all((conf > 0) & (conf <= 1))
+    bin_counts = np.ndarray((n_bins,), dtype=int)
+    sum_conf = np.ndarray((n_bins,), dtype=float)
+    sum_acc = np.ndarray((n_bins,), dtype=int)
+    for i_bin in range(n_bins):
+        a, b = i_bin / n_bins, (i_bin + 1) / n_bins
+        subsamples = (conf > a) & (conf <= b)
+        bin_counts[i_bin] = subsamples.sum()
+        sum_conf[i_bin] = conf[subsamples].sum()
+        sum_acc[i_bin] = acc[subsamples].sum()
+    sum_overconf = sum_conf - sum_acc
+    ece = np.abs(sum_overconf).sum() / len(conf)
+    if verbose:
+        print(f"ECE={ece:.4f}")
+        overconf = sum_overconf / bin_counts
+        print(f"overconf=\n{overconf}")
+    return ece
+
+
+def evaluate_on_dataset(
+        model, dataset, n_groups, with_ece=False, n_bins=10, verbose=True):
     """Evaluate model on dataset.
     Args:
         model: a LogisticRegression model
@@ -175,7 +197,19 @@ def evaluate_on_dataset(model, dataset, n_groups):
     preds = model.predict(x)
     corrects = preds == y
     group_accs = [corrects[g == g_id].mean() for g_id in range(n_groups)]
-    return preds, corrects, group_accs
+    ret = preds, corrects, group_accs
+
+    if with_ece:
+        pred_probs = model.predict_proba(x)
+        conf = pred_probs[np.arange(len(pred_probs)), preds]  # confidence
+        ece = get_ece(conf, corrects, n_bins=n_bins, verbose=verbose)
+        group_eces = [
+            get_ece(conf[g == g_id], corrects[g == g_id], n_bins=n_bins,
+                    verbose=verbose)
+            for g_id in range(n_groups)]
+        ret += (ece, group_eces)
+
+    return ret
 
 
 def dfr_tune(
@@ -222,7 +256,8 @@ def dfr_tune(
 
 
 def dfr_eval(
-        c, w1, w2, get_train_dataset, get_eval_dataset, n_groups, scaler, num_retrains=20):
+        c, w1, w2, get_train_dataset, get_eval_dataset, n_groups, scaler,
+        num_retrains=20, verbose=True):
     coefs, intercepts = [], []
 
     for i in range(num_retrains):
@@ -252,11 +287,16 @@ def dfr_eval(
     logreg.coef_ = np.mean(coefs, axis=0)
     logreg.intercept_ = np.mean(intercepts, axis=0)
 
-    preds_test, test_corrects, test_group_accs = evaluate_on_dataset(
-        logreg, (x_test, y_test, g_test), n_groups)
+    preds_test, test_corrects, test_group_accs, test_ece, test_group_eces = evaluate_on_dataset(
+        logreg, (x_test, y_test, g_test), n_groups, with_ece=True, verbose=verbose)
     test_mean_acc = test_corrects.mean()
-    preds_train, train_corrects, train_group_accs = evaluate_on_dataset(
-        logreg, (x_train, y_train, g_train), n_groups)
+    if verbose:
+        print(f" test: acc={test_mean_acc:.4f} group_accs={test_group_accs} ece={test_ece:.4f} group_eces={test_group_eces}")
+    preds_train, train_corrects, train_group_accs, train_ece, train_group_eces = evaluate_on_dataset(
+        logreg, (x_train, y_train, g_train), n_groups, with_ece=True, verbose=verbose)
+    train_mean_acc = train_corrects.mean()
+    if verbose:
+        print(f"train: acc={train_mean_acc:.4f} group_accs={train_group_accs} ece={train_ece:.4f} group_eces={train_group_eces}")
     return test_group_accs, test_mean_acc, train_group_accs
 
 
@@ -277,25 +317,23 @@ if __name__ == '__main__':
         target_resolution=target_resolution,
         train=False, augment_data=False)
 
-    trainset = WaterBirdsDataset(
-        basedir=args.data_dir, split="train", transform=train_transform)
-    testset = WaterBirdsDataset(
-        basedir=args.data_dir, split="test", transform=test_transform)
-    valset = WaterBirdsDataset(
-        basedir=args.data_dir, split="val", transform=test_transform)
+    datasets = {
+        split: WaterBirdsDataset(
+            basedir=args.data_dir, split=split, transform=test_transform)  # always use test_transform for evaluation
+        for split in ["train", "val", "test"]
+    }
+    trainset, valset, testset = datasets.values()
 
     loader_kwargs = {'batch_size': args.batch_size,
                     'num_workers': 4, 'pin_memory': True,
                     "reweight_places": None}
-    train_loader = get_loader(
-        trainset, train=True, reweight_groups=False, reweight_classes=False,
-        **loader_kwargs)
-    test_loader = get_loader(
-        testset, train=False, reweight_groups=None, reweight_classes=None,
-        **loader_kwargs)
-    val_loader = get_loader(
-        valset, train=False, reweight_groups=None, reweight_classes=None,
-        **loader_kwargs)
+    loaders = {
+        split: get_loader(
+            dataset, train=False, reweight_groups=None, reweight_classes=None,  # always in test mode for evaluation
+            # train=True, reweight_groups=False, reweight_classes=False,
+            **loader_kwargs)
+        for split, dataset in datasets.items()
+    }
 
     # Load model
     n_classes = trainset.n_classes
@@ -308,11 +346,11 @@ if __name__ == '__main__':
 
     # Evaluate model
     print("Base Model")
-    base_model_results = {}
     get_yp_func = partial(get_y_p, n_places=trainset.n_places)
-    base_model_results["test"] = evaluate(model, test_loader, get_yp_func)
-    base_model_results["val"] = evaluate(model, val_loader, get_yp_func)
-    base_model_results["train"] = evaluate(model, train_loader, get_yp_func)
+    base_model_results = {
+        split: evaluate(model, loader, get_yp_func)
+        for split, loader in loaders.items()
+    }
     print(json.dumps(base_model_results, indent=INDENT))
     print()
 
@@ -337,7 +375,7 @@ if __name__ == '__main__':
 
     all_embeddings = {}
     all_y, all_p, all_g = {}, {}, {}
-    for name, loader in [("train", train_loader), ("test", test_loader), ("val", val_loader)]:
+    for name, loader in loaders.items():
         all_embeddings[name] = []
         all_y[name], all_p[name], all_g[name] = [], [], []
         for x, y, g, p in tqdm.tqdm(loader):
