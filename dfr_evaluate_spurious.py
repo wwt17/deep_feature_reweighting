@@ -195,22 +195,22 @@ def get_ece(conf, acc, n_bins=10, verbose=True):
 
 
 def evaluate_on_dataset(
-        model, dataset, n_groups, with_ece=False, n_bins=10, verbose=True):
+        pred_probs, dataset, n_groups, with_ece=False, n_bins=10,
+        verbose=True):
     """Evaluate model on dataset.
     Args:
-        model: a LogisticRegression model
+        pred_probs: predicted probabilities of shape (n, n_classes)
         dataset: (x, y, g)
     Returns:
         preds, corrects, group_accs
     """
     x, y, g = dataset
-    preds = model.predict(x)
+    preds = pred_probs.argmax(axis=-1)
     corrects = preds == y
     group_accs = [corrects[g == g_id].mean() for g_id in range(n_groups)]
     ret = preds, corrects, group_accs
 
     if with_ece:
-        pred_probs = model.predict_proba(x)
         conf = np.take_along_axis(pred_probs, np.expand_dims(preds, axis=-1), axis=-1).squeeze(axis=-1)  # confidence
         ece = get_ece(conf, corrects, n_bins=n_bins, verbose=verbose)
         group_eces = [
@@ -253,8 +253,9 @@ def dfr_tune(
                     penalty=REG, C=c, solver="liblinear",
                     class_weight=class_weight, max_iter=max_iter)
                 logreg.fit(x_train, y_train)
-                preds_val, corrects, group_accs = evaluate_on_dataset(
-                    logreg, (x_val, y_val, g_val), n_groups)
+                val_pred_probs = logreg.predict_proba(x_val)
+                val_preds, corrects, group_accs = evaluate_on_dataset(
+                    val_pred_probs, (x_val, y_val, g_val), n_groups)
                 group_accs = np.array(group_accs)
                 worst_acc = np.min(group_accs)
                 worst_accs[c, class_weight[0], class_weight[1]] += worst_acc
@@ -285,7 +286,6 @@ def dfr_eval(
 
     x_test, y_test, g_test = get_eval_dataset()
     print(f"test group sizes: {np.bincount(g_test)}")
-
     if scaler is not None:
         x_test = scaler.transform(x_test)
 
@@ -297,17 +297,27 @@ def dfr_eval(
     logreg.coef_ = np.mean(coefs, axis=0)
     logreg.intercept_ = np.mean(intercepts, axis=0)
 
-    preds_test, test_corrects, test_group_accs, test_ece, test_group_eces = evaluate_on_dataset(
-        logreg, (x_test, y_test, g_test), n_groups, with_ece=True, verbose=verbose)
-    test_mean_acc = test_corrects.mean()
-    if verbose:
-        print(f" test: acc={test_mean_acc:.4f} group_accs={test_group_accs} ece={test_ece:.4f} group_eces={test_group_eces}")
-    preds_train, train_corrects, train_group_accs, train_ece, train_group_eces = evaluate_on_dataset(
-        logreg, (x_train, y_train, g_train), n_groups, with_ece=True, verbose=verbose)
-    train_mean_acc = train_corrects.mean()
-    if verbose:
-        print(f"train: acc={train_mean_acc:.4f} group_accs={train_group_accs} ece={train_ece:.4f} group_eces={train_group_eces}")
-    return test_group_accs, test_mean_acc, train_group_accs
+    datasets = {
+        "test": (x_test, y_test, g_test),
+        "train": (x_train, y_train, g_train),
+    }
+    results = {}
+    for split, dataset in datasets.items():
+        x, y, g = dataset
+        pred_probs = logreg.predict_proba(x)
+        preds, corrects, group_accs, ece, group_eces = evaluate_on_dataset(
+            pred_probs, dataset, n_groups, with_ece=True, verbose=verbose)
+        mean_acc = corrects.mean()
+        worst_group_acc = np.min(group_accs)
+        results[split] = {
+            "mean_acc": mean_acc,
+            "group_accs": group_accs,
+            "worst_group_acc": worst_group_acc,
+            "ece": ece,
+            "group_eces": group_eces,
+        }
+
+    return results
 
 
 if __name__ == '__main__':
@@ -374,6 +384,7 @@ if __name__ == '__main__':
             "group_eces": group_eces,
         }
         base_model_results[split] = results
+    print("Base Model results:")
     print(json.dumps(base_model_results, indent=INDENT))
     print()
 
@@ -426,17 +437,14 @@ if __name__ == '__main__':
         learn_class_weights=not(args.balance_dfr_val and args.notrain_dfr_val))
     dfr_val_results["best_hypers"] = (c, w1, w2)
     print("Hypers:", (c, w1, w2))
-    test_accs, test_mean_acc, train_accs = dfr_eval(
+    dfr_val_results.update(dfr_eval(
         c, w1, w2,
         partial(get_val_set, all_embeddings, all_y, all_g, n_groups,
                 group_balance=args.balance_dfr_val,
                 add_train=not args.notrain_dfr_val, random_selection=True),
         partial(get_split, "test", all_embeddings, all_y, all_g),
-        n_groups, scaler)
-    dfr_val_results["test_accs"] = test_accs
-    dfr_val_results["train_accs"] = train_accs
-    dfr_val_results["test_worst_acc"] = np.min(test_accs)
-    dfr_val_results["test_mean_acc"] = test_mean_acc
+        n_groups, scaler))
+    print("DFR on validation results:")
     print(json.dumps(dfr_val_results, indent=INDENT))
     print()
 
@@ -451,25 +459,22 @@ if __name__ == '__main__':
         max_iter=20)
     dfr_train_results["best_hypers"] = (c, w1, w2)
     print("Hypers:", (c, w1, w2))
-    test_accs, test_mean_acc, train_accs = dfr_eval(
+    dfr_train_results.update(dfr_eval(
         c, w1, w2,
         partial(get_split, "train", all_embeddings, all_y, all_g, n_groups,
                 group_balance=True),
         partial(get_split, "test", all_embeddings, all_y, all_g),
-        n_groups, scaler)
-    dfr_train_results["test_accs"] = test_accs
-    dfr_train_results["train_accs"] = train_accs
-    dfr_train_results["test_worst_acc"] = np.min(test_accs)
-    dfr_train_results["test_mean_acc"] = test_mean_acc
+        n_groups, scaler))
+    print("DFR on train subsampled results:")
     print(json.dumps(dfr_train_results, indent=INDENT))
     print()
 
 
-    all_results = {}
-    all_results["base_model_results"] = base_model_results
-    all_results["dfr_val_results"] = dfr_val_results
-    all_results["dfr_train_results"] = dfr_train_results
-    print(json.dumps(all_results, indent=INDENT))
+    all_results = {
+        "base_model_results": base_model_results,
+        "dfr_val_results": dfr_val_results,
+        "dfr_train_results": dfr_train_results,
+    }
 
     args.result_path.parent.mkdir(parents=True, exist_ok=True)
     with open(args.result_path, 'w') as f:
