@@ -20,6 +20,7 @@ from sklearn.preprocessing import StandardScaler
 
 from wb_data import WaterBirdsDataset, get_loader, get_transform_cub, log_data
 from utils import Logger, AverageMeter, set_seed, evaluate, get_y_p
+from bayesian_models import BayesianLinearRegression
 
 
 # WaterBirds
@@ -61,6 +62,13 @@ def build_argparser():
     parser.add_argument(
         "--tune_class_weights_dfr_train", action='store_true',
         help="Learn class weights for DFR(Train)")
+    parser.add_argument(
+        "--bayesian", action="store_true",
+        help="Run Bayesian models")
+    parser.add_argument(
+        "--prior_precision", type=float, default=1.)
+    parser.add_argument(
+        "--noise_precision", type=float, default=10.)
     parser.add_argument(
         "--seed", type=int, default=None, help="Random seed")
     return parser
@@ -266,6 +274,14 @@ def dfr_tune(
     return best_hypers
 
 
+def print_logreg(logreg):
+    coef_mean, coef_var = np.mean(logreg.coef_), np.var(logreg.coef_)
+    coef_l1_norm = np.linalg.norm(logreg.coef_, ord=1, axis=-1)
+    coef_l2_norm = np.linalg.norm(logreg.coef_, ord=2, axis=-1)
+    print(f"coef: mean={coef_mean} var={coef_var} l1={coef_l1_norm} l2={coef_l2_norm}\n{logreg.coef_}")
+    print(f"intercept: {logreg.intercept_}")
+
+
 def dfr_eval(
         c, w1, w2, get_train_dataset, get_eval_dataset, n_groups, scaler,
         num_retrains=20, verbose=True):
@@ -283,6 +299,9 @@ def dfr_eval(
 
         coefs.append(logreg.coef_)
         intercepts.append(logreg.intercept_)
+        if verbose:
+            print(f"logreg #{i}:")
+            print_logreg(logreg)
 
     x_test, y_test, g_test = get_eval_dataset()
     print(f"test group sizes: {np.bincount(g_test)}")
@@ -296,6 +315,9 @@ def dfr_eval(
     logreg.fit(x_train[:n_classes], np.arange(n_classes))
     logreg.coef_ = np.mean(coefs, axis=0)
     logreg.intercept_ = np.mean(intercepts, axis=0)
+    if verbose:
+        print(f"logreg averaged:")
+        print_logreg(logreg)
 
     datasets = {
         "test": (x_test, y_test, g_test),
@@ -305,6 +327,51 @@ def dfr_eval(
     for split, dataset in datasets.items():
         x, y, g = dataset
         pred_probs = logreg.predict_proba(x)
+        preds, corrects, group_accs, ece, group_eces = evaluate_on_dataset(
+            pred_probs, dataset, n_groups, with_ece=True, verbose=verbose)
+        mean_acc = corrects.mean()
+        worst_group_acc = np.min(group_accs)
+        results[split] = {
+            "mean_acc": mean_acc,
+            "group_accs": group_accs,
+            "worst_group_acc": worst_group_acc,
+            "ece": ece,
+            "group_eces": group_eces,
+        }
+
+    return results
+
+
+def bayesian_linear_regression_eval(
+        get_train_dataset, get_eval_dataset, n_groups, scaler,
+        prior_precision=1., noise_precision=10., verbose=True):
+    x_train, y_train, g_train = get_train_dataset()
+    print(f"train group sizes: {np.bincount(g_train)}")
+    if scaler is not None:
+        x_train = scaler.transform(x_train)
+
+    blreg = BayesianLinearRegression(
+        x_train.shape[-1],
+        precision=prior_precision,
+        noise_precision=noise_precision)
+    blreg.fit(x_train, y_train * 2 - 1)  # convert labels in {0, 1} to {-1, +1}
+
+    x_test, y_test, g_test = get_eval_dataset()
+    print(f"test group sizes: {np.bincount(g_test)}")
+    if scaler is not None:
+        x_test = scaler.transform(x_test)
+
+    datasets = {
+        "test": (x_test, y_test, g_test),
+        "train": (x_train, y_train, g_train),
+    }
+    results = {}
+    for split, dataset in datasets.items():
+        x, y, g = dataset
+        pred_dist = blreg.predictive_distribution(x)
+        pred_prob0 = pred_dist.cdf(torch.zeros_like(pred_dist.mean))
+        pred_prob1 = 1 - pred_prob0
+        pred_probs = np.column_stack((pred_prob0, pred_prob1))
         preds, corrects, group_accs, ece, group_eces = evaluate_on_dataset(
             pred_probs, dataset, n_groups, with_ece=True, verbose=verbose)
         mean_acc = corrects.mean()
@@ -475,6 +542,21 @@ if __name__ == '__main__':
         "dfr_val_results": dfr_val_results,
         "dfr_train_results": dfr_train_results,
     }
+
+    if args.bayesian:
+        # Bayesian Linear Regression on Labels
+        print("Bayesian Linear Regression on Labels")
+        blreg_results = bayesian_linear_regression_eval(
+            partial(get_split, "train", all_embeddings, all_y, all_g, n_groups,
+                    group_balance=False),
+            partial(get_split, "test", all_embeddings, all_y, all_g),
+            n_groups, scaler,
+            prior_precision=args.prior_precision,
+            noise_precision=args.noise_precision)
+        print("Bayesian Linear Regression on Labels results:")
+        print(json.dumps(blreg_results, indent=INDENT))
+        print()
+        all_results["blreg_results"] = blreg_results
 
     args.result_path.parent.mkdir(parents=True, exist_ok=True)
     with open(args.result_path, 'w') as f:
