@@ -62,6 +62,10 @@ def build_argparser():
         "--tune_class_weights_dfr_train", action='store_true',
         help="Learn class weights for DFR(Train)")
     parser.add_argument(
+        "--reg", type=lambda s: None if s == "None" else s,
+        choices=["l1", "l2", "elasticnet", None], default=REG,
+        help="regularization (i.e., penalty) for logistic regression.")
+    parser.add_argument(
         "--seed", type=int, default=None, help="Random seed")
     return parser
 
@@ -224,12 +228,14 @@ def evaluate_on_dataset(
 
 def dfr_tune(
         get_datasets, n_groups, scaler="train", num_retrains=1,
-        learn_class_weights=False, max_iter=100):
+        learn_class_weights=False,
+        logreg_kwargs=dict(penalty=REG, solver="liblinear")):
     """
     Args:
         get_datasets: callable to get train and val sets.
         n_groups: int, number of groups
         scaler: If set to "train", fit the train set each time from get_datasets. None for no preprocessing.
+        logreg_kwargs: kwargs passed to LogisticRegression
     """
     worst_accs = defaultdict(float)
     for i in range(num_retrains):
@@ -250,8 +256,7 @@ def dfr_tune(
         for c in C_OPTIONS:
             for class_weight in cls_w_options:
                 logreg = LogisticRegression(
-                    penalty=REG, C=c, solver="liblinear",
-                    class_weight=class_weight, max_iter=max_iter)
+                    C=c, class_weight=class_weight, **logreg_kwargs)
                 logreg.fit(x_train, y_train)
                 val_pred_probs = logreg.predict_proba(x_val)
                 val_preds, corrects, group_accs = evaluate_on_dataset(
@@ -268,7 +273,9 @@ def dfr_tune(
 
 def dfr_eval(
         c, w1, w2, get_train_dataset, get_eval_dataset, n_groups, scaler,
-        num_retrains=20, verbose=True):
+        num_retrains=20,
+        logreg_kwargs=dict(penalty=REG, solver="liblinear"),
+        verbose=True):
     coefs, intercepts = [], []
 
     for i in range(num_retrains):
@@ -277,8 +284,8 @@ def dfr_eval(
         if scaler is not None:
             x_train = scaler.transform(x_train)
 
-        logreg = LogisticRegression(penalty=REG, C=c, solver="liblinear",
-                                    class_weight={0: w1, 1: w2})
+        logreg = LogisticRegression(
+            C=c, class_weight={0: w1, 1: w2}, **logreg_kwargs)
         logreg.fit(x_train, y_train)
 
         coefs.append(logreg.coef_)
@@ -289,8 +296,8 @@ def dfr_eval(
     if scaler is not None:
         x_test = scaler.transform(x_test)
 
-    logreg = LogisticRegression(penalty=REG, C=c, solver="liblinear",
-                                class_weight={0: w1, 1: w2})
+    logreg = LogisticRegression(
+        C=c, class_weight={0: w1, 1: w2}, **logreg_kwargs)
     n_classes = np.max(y_train) + 1
     # the fit is only needed to set up logreg
     logreg.fit(x_train[:n_classes], np.arange(n_classes))
@@ -434,7 +441,8 @@ if __name__ == '__main__':
                 group_balance=args.balance_dfr_val,
                 add_train=not args.notrain_dfr_val),
         n_groups,
-        learn_class_weights=not(args.balance_dfr_val and args.notrain_dfr_val))
+        learn_class_weights=not(args.balance_dfr_val and args.notrain_dfr_val),
+        logreg_kwargs=dict(penalty=args.reg, solver="liblinear"))
     dfr_val_results["best_hypers"] = (c, w1, w2)
     print("Hypers:", (c, w1, w2))
     dfr_val_results.update(dfr_eval(
@@ -443,7 +451,8 @@ if __name__ == '__main__':
                 group_balance=args.balance_dfr_val,
                 add_train=not args.notrain_dfr_val, random_selection=True),
         partial(get_split, "test", all_embeddings, all_y, all_g),
-        n_groups, scaler))
+        n_groups, scaler,
+        logreg_kwargs=dict(penalty=args.reg, solver="liblinear")))
     print("DFR on validation results:")
     print(json.dumps(dfr_val_results, indent=INDENT))
     print()
@@ -456,7 +465,7 @@ if __name__ == '__main__':
                 group_balance=True),
         n_groups, scaler=scaler,
         learn_class_weights=args.tune_class_weights_dfr_train,
-        max_iter=20)
+        logreg_kwargs=dict(penalty=args.reg, solver="liblinear", max_iter=20))
     dfr_train_results["best_hypers"] = (c, w1, w2)
     print("Hypers:", (c, w1, w2))
     dfr_train_results.update(dfr_eval(
@@ -464,7 +473,8 @@ if __name__ == '__main__':
         partial(get_split, "train", all_embeddings, all_y, all_g, n_groups,
                 group_balance=True),
         partial(get_split, "test", all_embeddings, all_y, all_g),
-        n_groups, scaler))
+        n_groups, scaler,
+        logreg_kwargs=dict(penalty=args.reg, solver="liblinear")))
     print("DFR on train subsampled results:")
     print(json.dumps(dfr_train_results, indent=INDENT))
     print()
