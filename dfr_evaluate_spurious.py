@@ -11,9 +11,10 @@ import tqdm
 import argparse
 import sys
 from pathlib import Path
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 import json
 from functools import partial
+from itertools import product
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
@@ -23,18 +24,38 @@ from utils import Logger, AverageMeter, set_seed, evaluate, get_y_p
 from bayesian_models import BayesianLinearRegression
 
 
-# WaterBirds
-C_OPTIONS = [1., 0.7, 0.3, 0.1, 0.07, 0.03, 0.01]
-CLASS_WEIGHT_OPTIONS = [1., 2., 3., 10., 100., 300., 1000.]
-# CelebA
-REG = "l1"
-# # REG = "l2"
-# C_OPTIONS = [3., 1., 0.3, 0.1, 0.03, 0.01, 0.003]
-# CLASS_WEIGHT_OPTIONS = [1., 2., 3., 10., 100, 300, 500]
-
+OPTION_SET_NAME = "WaterBirds"
+PENALTY_OPTIONS = ["l1", "l2"][:1]
+if OPTION_SET_NAME == "WaterBirds":
+    C_OPTIONS = [1., 0.7, 0.3, 0.1, 0.07, 0.03, 0.01]
+    CLASS_WEIGHT_OPTIONS = [1., 2., 3., 10., 100., 300., 1000.]
+elif OPTION_SET_NAME == "CelebA":
+    C_OPTIONS = [3., 1., 0.3, 0.1, 0.03, 0.01, 0.003]
+    CLASS_WEIGHT_OPTIONS = [1., 2., 3., 10., 100., 300., 500.]
 CLASS_WEIGHT_OPTIONS = (
-    [{0: 1., 1: w} for w in CLASS_WEIGHT_OPTIONS] +
-    [{0: w, 1: 1.} for w in CLASS_WEIGHT_OPTIONS if w != 1.])
+    [(1., w) for w in CLASS_WEIGHT_OPTIONS] +
+    [(w, 1.) for w in CLASS_WEIGHT_OPTIONS if w != 1.])
+DEFAULT_CLASS_WEIGHT = [(1., 1.)]
+INTERCEPT_SCALING_OPTIONS = [0.1, 0.3, 1., 3., 10.][2:3]
+
+
+class HyperParams(
+    namedtuple(
+        "HyperParams_",
+        ["penalty", "C", "intercept_scaling", "class_weight"]
+    )
+):
+    """Hyper-parameters for LogisticRegression.
+    class_weight should be a tuple.
+    """
+    def to_kwargs(self):
+        kwargs = self._asdict()
+        kwargs["class_weight"] = {
+            i: w for i, w in enumerate(kwargs["class_weight"])}
+        return kwargs
+
+    def __str__(self):
+        return f"{self.penalty},C={self.C:<4},IS={self.intercept_scaling:<5},CW={str(self.class_weight):<13}"
 
 
 INDENT = '\t'
@@ -63,8 +84,8 @@ def build_argparser():
         "--tune_class_weights_dfr_train", action='store_true',
         help="Learn class weights for DFR(Train)")
     parser.add_argument(
-        "--reg", type=lambda s: None if s == "None" else s,
-        choices=["l1", "l2", "elasticnet", None], default=REG,
+        "--penalty", type=lambda s: None if s == "None" else s,
+        choices=["tune", "l1", "l2", "elasticnet", None], default="tune",
         help="regularization (i.e., penalty) for logistic regression.")
     parser.add_argument(
         "--bayesian", action="store_true",
@@ -235,11 +256,11 @@ def evaluate_on_dataset(
 
 
 def dfr_tune(
-        get_datasets, n_groups, scaler="train", num_retrains=1,
-        learn_class_weights=False,
-        logreg_kwargs=dict(penalty=REG, solver="liblinear")):
+        hyper_options, get_datasets, n_groups, scaler="train", num_retrains=1,
+        logreg_kwargs=dict(solver="liblinear")):
     """
     Args:
+        hyper_options: iterable of HyperParams, hyper-parameter options to try.
         get_datasets: callable to get train and val sets.
         n_groups: int, number of groups
         scaler: If set to "train", fit the train set each time from get_datasets. None for no preprocessing.
@@ -258,21 +279,17 @@ def dfr_tune(
             x_train = _scaler.transform(x_train)
             x_val = _scaler.transform(x_val)
 
-        cls_w_options = (
-            CLASS_WEIGHT_OPTIONS if learn_class_weights else
-            [{0: 1., 1: 1.}])
-        for c in C_OPTIONS:
-            for class_weight in cls_w_options:
-                logreg = LogisticRegression(
-                    C=c, class_weight=class_weight, **logreg_kwargs)
-                logreg.fit(x_train, y_train)
-                val_pred_probs = logreg.predict_proba(x_val)
-                val_preds, corrects, group_accs = evaluate_on_dataset(
-                    val_pred_probs, (x_val, y_val, g_val), n_groups)
-                group_accs = np.array(group_accs)
-                worst_acc = np.min(group_accs)
-                worst_accs[c, class_weight[0], class_weight[1]] += worst_acc
-                print(f"{c=:<4} class_weight={str(class_weight):<19} {worst_acc=:.4f} {group_accs=}")
+        for hypers in hyper_options:
+            logreg = LogisticRegression(
+                **hypers.to_kwargs(), **logreg_kwargs)
+            logreg.fit(x_train, y_train)
+            val_pred_probs = logreg.predict_proba(x_val)
+            val_preds, corrects, group_accs = evaluate_on_dataset(
+                val_pred_probs, (x_val, y_val, g_val), n_groups)
+            group_accs = np.array(group_accs)
+            worst_acc = np.min(group_accs)
+            worst_accs[hypers] += worst_acc
+            print(f"{hypers} {worst_acc=:.4f} {group_accs=}")
 
     ks, vs = list(worst_accs.keys()), list(worst_accs.values())
     best_hypers = ks[np.argmax(vs)]
@@ -288,9 +305,9 @@ def print_logreg(logreg):
 
 
 def dfr_eval(
-        c, w1, w2, get_train_dataset, get_eval_dataset, n_groups, scaler,
+        hypers, get_train_dataset, get_eval_dataset, n_groups, scaler,
         num_retrains=20,
-        logreg_kwargs=dict(penalty=REG, solver="liblinear"),
+        logreg_kwargs=dict(solver="liblinear"),
         verbose=True):
     coefs, intercepts = [], []
 
@@ -301,7 +318,7 @@ def dfr_eval(
             x_train = scaler.transform(x_train)
 
         logreg = LogisticRegression(
-            C=c, class_weight={0: w1, 1: w2}, **logreg_kwargs)
+            **hypers.to_kwargs(), **logreg_kwargs)
         logreg.fit(x_train, y_train)
 
         coefs.append(logreg.coef_)
@@ -316,7 +333,7 @@ def dfr_eval(
         x_test = scaler.transform(x_test)
 
     logreg = LogisticRegression(
-        C=c, class_weight={0: w1, 1: w2}, **logreg_kwargs)
+        **hypers.to_kwargs(), **logreg_kwargs)
     n_classes = np.max(y_train) + 1
     # the fit is only needed to set up logreg
     logreg.fit(x_train[:n_classes], np.arange(n_classes))
@@ -500,26 +517,36 @@ if __name__ == '__main__':
     scaler = StandardScaler()
     scaler.fit(all_embeddings["train"])
 
+    # Hyperparams options
+    penalty_options = [args.penalty] if args.penalty != "tune" else PENALTY_OPTIONS
+
     # DFR on validation
     print("DFR on validation")
     dfr_val_results = {}
-    c, w1, w2 = dfr_tune(
+    learn_class_weights = not(args.balance_dfr_val and args.notrain_dfr_val)
+    class_weight_options = (
+        CLASS_WEIGHT_OPTIONS if learn_class_weights else
+        DEFAULT_CLASS_WEIGHT)
+    hyper_options = map(
+        HyperParams._make,
+        product(penalty_options, C_OPTIONS, INTERCEPT_SCALING_OPTIONS,
+                class_weight_options),
+    )
+    hyper = dfr_tune(
+        hyper_options,
         partial(split_val_set, all_embeddings, all_y, all_g, n_groups,
                 group_balance=args.balance_dfr_val,
                 add_train=not args.notrain_dfr_val),
-        n_groups,
-        learn_class_weights=not(args.balance_dfr_val and args.notrain_dfr_val),
-        logreg_kwargs=dict(penalty=args.reg, solver="liblinear"))
-    dfr_val_results["best_hypers"] = (c, w1, w2)
-    print("Hypers:", (c, w1, w2))
+        n_groups)
+    dfr_val_results["best_hypers"] = hyper
+    print("Hypers:", hyper)
     dfr_val_results.update(dfr_eval(
-        c, w1, w2,
+        hyper,
         partial(get_val_set, all_embeddings, all_y, all_g, n_groups,
                 group_balance=args.balance_dfr_val,
                 add_train=not args.notrain_dfr_val, random_selection=True),
         partial(get_split, "test", all_embeddings, all_y, all_g),
-        n_groups, scaler,
-        logreg_kwargs=dict(penalty=args.reg, solver="liblinear")))
+        n_groups, scaler))
     print("DFR on validation results:")
     print(json.dumps(dfr_val_results, indent=INDENT))
     print()
@@ -527,21 +554,29 @@ if __name__ == '__main__':
     # DFR on train subsampled
     print("DFR on train subsampled")
     dfr_train_results = {}
-    c, w1, w2 = dfr_tune(
+    learn_class_weights = args.tune_class_weights_dfr_train
+    class_weight_options = (
+        CLASS_WEIGHT_OPTIONS if learn_class_weights else
+        DEFAULT_CLASS_WEIGHT)
+    hyper_options = map(
+        HyperParams._make,
+        product(penalty_options, C_OPTIONS, INTERCEPT_SCALING_OPTIONS,
+                class_weight_options),
+    )
+    hyper = dfr_tune(
+        hyper_options,
         partial(get_train_val_set, all_embeddings, all_y, all_g, n_groups,
                 group_balance=True),
         n_groups, scaler=scaler,
-        learn_class_weights=args.tune_class_weights_dfr_train,
-        logreg_kwargs=dict(penalty=args.reg, solver="liblinear", max_iter=20))
-    dfr_train_results["best_hypers"] = (c, w1, w2)
-    print("Hypers:", (c, w1, w2))
+        logreg_kwargs=dict(solver="liblinear", max_iter=20))
+    dfr_train_results["best_hypers"] = hyper
+    print("Hypers:", hyper)
     dfr_train_results.update(dfr_eval(
-        c, w1, w2,
+        hyper,
         partial(get_split, "train", all_embeddings, all_y, all_g, n_groups,
                 group_balance=True),
         partial(get_split, "test", all_embeddings, all_y, all_g),
-        n_groups, scaler,
-        logreg_kwargs=dict(penalty=args.reg, solver="liblinear")))
+        n_groups, scaler))
     print("DFR on train subsampled results:")
     print(json.dumps(dfr_train_results, indent=INDENT))
     print()
