@@ -36,7 +36,7 @@ CLASS_WEIGHT_OPTIONS = (
     [(1., w) for w in CLASS_WEIGHT_OPTIONS] +
     [(w, 1.) for w in CLASS_WEIGHT_OPTIONS if w != 1.])
 DEFAULT_CLASS_WEIGHT = [(1., 1.)]
-INTERCEPT_SCALING_OPTIONS = [0.1, 0.3, 1., 3., 10.][2:3]
+INTERCEPT_SCALING_OPTIONS = [1., 10., 30., 100.]
 
 
 class HyperParams(
@@ -56,6 +56,26 @@ class HyperParams(
 
     def __str__(self):
         return f"{self.penalty},C={self.C:<4},IS={self.intercept_scaling:<5},CW={str(self.class_weight):<13}"
+
+
+BL_PRECISION_OPTIONS = [300., 1000., 3000.]
+BL_NOISE_PRECISION_OPTIONS = [10., 30., 100., 300.]
+BL_INTERCEPT_SCALING_OPTIONS = [100.]
+
+
+class BayesianHyperParams(
+    namedtuple(
+        "BayesianHyperParams_",
+        ["precision", "noise_precision", "intercept_scaling"]
+    )
+):
+    """Hyper-parameters for BayesianLinearRegression.
+    """
+    def to_kwargs(self):
+        return self._asdict()
+    
+    def __str__(self):
+        return f"prior={self.precision:<6},noise={self.noise_precision:<5},IS={self.intercept_scaling:<5}"
 
 
 INDENT = '\t'
@@ -366,9 +386,62 @@ def dfr_eval(
     return results
 
 
+def bayesian_linear_regression_pred_probs(blreg, x):
+    pred_dist = blreg.predictive_distribution(x)
+    pred_prob0 = pred_dist.cdf(torch.zeros_like(pred_dist.mean))
+    pred_prob1 = 1 - pred_prob0
+    pred_probs = np.column_stack((pred_prob0, pred_prob1))
+    return pred_probs
+
+
+def bayesian_linear_regression_tune(
+        hyper_options, get_datasets, n_groups, scaler="train", num_retrains=1,
+        ece_ratio=.5):
+    """Tune hyper-parameters of Bayesian linear regression.
+    Args:
+        hyper_options: iterable of BayesianHyperParams, hyper-parameter options to try.
+        get_datasets: callable to get train and val sets.
+        n_groups: int, number of groups
+        scaler: If set to "train", fit the train set each time from get_datasets. None for no preprocessing.
+        ece_ratio: optimization objective is minimizing
+            (1-ece_ratio) * worst_group_err + ece_ratio * ece
+    """
+    objectives = defaultdict(float)
+    for i in range(num_retrains):
+        (x_train, y_train, g_train), (x_val, y_val, g_val) = get_datasets()
+        print(f"train group sizes: {np.bincount(g_train)}")
+        if scaler == "train":
+            _scaler = StandardScaler()
+            _scaler.fit(x_train)
+        else:
+            _scaler = scaler
+        if _scaler is not None:
+            x_train = _scaler.transform(x_train)
+            x_val = _scaler.transform(x_val)
+
+        for hypers in hyper_options:
+            blreg = BayesianLinearRegression(
+                x_train.shape[-1],
+                **hypers.to_kwargs())
+            blreg.fit(x_train, y_train * 2 - 1)
+            val_pred_probs = bayesian_linear_regression_pred_probs(blreg, x_val)
+            val_preds, corrects, group_accs, ece, group_eces = evaluate_on_dataset(
+                val_pred_probs, (x_val, y_val, g_val), n_groups, with_ece=True, verbose=False)
+            group_accs = np.array(group_accs)
+            worst_group_acc = np.min(group_accs)
+            worst_group_err = 1 - worst_group_acc
+            objective = (1-ece_ratio) * worst_group_err + ece_ratio * ece
+            objectives[hypers] += objective
+            print(f"{hypers} worst={worst_group_acc:.4f} accs={group_accs} {ece=:.4f} obj={objective:.4f}")
+
+    ks, vs = list(objectives.keys()), list(objectives.values())
+    best_hypers = ks[np.argmin(vs)]
+    return best_hypers
+
+
 def bayesian_linear_regression_eval(
-        get_train_dataset, get_eval_dataset, n_groups, scaler,
-        prior_precision=1., noise_precision=10., verbose=True):
+        hypers, get_train_dataset, get_eval_dataset, n_groups, scaler,
+        verbose=True):
     x_train, y_train, g_train = get_train_dataset()
     print(f"train group sizes: {np.bincount(g_train)}")
     if scaler is not None:
@@ -376,8 +449,7 @@ def bayesian_linear_regression_eval(
 
     blreg = BayesianLinearRegression(
         x_train.shape[-1],
-        precision=prior_precision,
-        noise_precision=noise_precision)
+        **hypers.to_kwargs())
     blreg.fit(x_train, y_train * 2 - 1)  # convert labels in {0, 1} to {-1, +1}
 
     x_test, y_test, g_test = get_eval_dataset()
@@ -392,10 +464,7 @@ def bayesian_linear_regression_eval(
     results = {}
     for split, dataset in datasets.items():
         x, y, g = dataset
-        pred_dist = blreg.predictive_distribution(x)
-        pred_prob0 = pred_dist.cdf(torch.zeros_like(pred_dist.mean))
-        pred_prob1 = 1 - pred_prob0
-        pred_probs = np.column_stack((pred_prob0, pred_prob1))
+        pred_probs = bayesian_linear_regression_pred_probs(blreg, x)
         preds, corrects, group_accs, ece, group_eces = evaluate_on_dataset(
             pred_probs, dataset, n_groups, with_ece=True, verbose=verbose)
         mean_acc = corrects.mean()
@@ -591,13 +660,28 @@ if __name__ == '__main__':
     if args.bayesian:
         # Bayesian Linear Regression on Labels
         print("Bayesian Linear Regression on Labels")
-        blreg_results = bayesian_linear_regression_eval(
-            partial(get_split, "train", all_embeddings, all_y, all_g, n_groups,
-                    group_balance=False),
+        blreg_results = {}
+        hyper_options = map(
+            BayesianHyperParams._make,
+            product(BL_PRECISION_OPTIONS, BL_NOISE_PRECISION_OPTIONS,
+                    BL_INTERCEPT_SCALING_OPTIONS)
+        )
+        hyper = bayesian_linear_regression_tune(
+            hyper_options,
+            partial(split_val_set, all_embeddings, all_y, all_g, n_groups,
+                    group_balance=True,
+                    add_train=False),
+            n_groups, scaler=scaler,
+            ece_ratio=.5)
+        blreg_results["best_hypers"] = hyper
+        print("Hypers:", hyper)
+        blreg_results.update(bayesian_linear_regression_eval(
+            hyper,
+            partial(get_val_set, all_embeddings, all_y, all_g, n_groups,
+                    group_balance=True,
+                    add_train=False, random_selection=True),
             partial(get_split, "test", all_embeddings, all_y, all_g),
-            n_groups, scaler,
-            prior_precision=args.prior_precision,
-            noise_precision=args.noise_precision)
+            n_groups, scaler))
         print("Bayesian Linear Regression on Labels results:")
         print(json.dumps(blreg_results, indent=INDENT))
         print()
