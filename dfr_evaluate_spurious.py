@@ -166,14 +166,16 @@ def get_val_set(all_embeddings, all_y, all_g, n_groups, group_balance=False, add
     return x, y, g
 
 
-def get_train_val_set(all_embeddings, all_y, all_g, n_groups, group_balance=False):
+def get_train_val_set(all_embeddings, all_y, all_g, n_groups, group_balance=False, max_n=None, random_selection=False):
     """Get original train and val sets.
     Returns: ((x_train, y_train, g_train), (x_val, y_val, g_val))
     """
     return (
         get_split(
             "train", all_embeddings, all_y, all_g, n_groups,
-            group_balance=group_balance),
+            group_balance=group_balance,
+            max_n=max_n,
+            random_selection=random_selection),
         get_split(
             "val", all_embeddings, all_y, all_g, n_groups,
             group_balance=False)
