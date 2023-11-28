@@ -436,9 +436,10 @@ def bayesian_linear_regression_tune(
             group_accs = np.array(group_accs)
             worst_group_acc = np.min(group_accs)
             worst_group_err = 1 - worst_group_acc
-            objective = (1-ece_ratio) * worst_group_err + ece_ratio * ece
+            worst_group_ece = np.max(group_eces)
+            objective = (1-ece_ratio) * worst_group_err + ece_ratio * worst_group_ece
             objectives[hypers] += objective
-            print(f"{hypers} worst={worst_group_acc:.4f} accs={group_accs} {ece=:.4f} obj={objective:.4f}")
+            print(f"{hypers} accs={group_accs} worst={worst_group_acc:.4f} {ece=:.4f} worst={worst_group_ece:.4f} obj={objective:.4f}")
 
     ks, vs = list(objectives.keys()), list(objectives.values())
     best_hypers = ks[np.argmin(vs)]
