@@ -248,8 +248,8 @@ def get_ece(conf, acc, n_bins=10, verbose=True):
         print(f"ECE={ece:.4f}")
         overconf = sum_overconf / bin_counts
         bin_low = n_bins // 2
-        print("bin_counts=" + " ".join(map("{:5d}".format, bin_counts[bin_low:])))
-        print("  overconf=" + " ".join(map("{:5.3f}".format, overconf[bin_low:])))
+        print("bin_counts=" + " ".join(map("{:6d}".format, bin_counts[bin_low:])))
+        print("  overconf=" + " ".join(map("{:6.3f}".format, overconf[bin_low:])))
     return ece
 
 
