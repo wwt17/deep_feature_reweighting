@@ -93,8 +93,8 @@ def build_argparser():
         "--ckpt_path", type=Path, default=None, help="Checkpoint path")
     parser.add_argument(
         "--expr", type=str, nargs="*",
-        choices=["base", "on_val", "on_train", "blreg"],
-        default=["base", "on_val", "on_train", "blreg"],
+        choices=["base", "on_val", "on_train", "blreg_on_val", "blreg_on_unbalanced_train"],
+        default=["base", "on_val", "on_train"],
         help="Experiments to run")
     parser.add_argument(
         "--train_frac", type=float, default=1.,
@@ -658,9 +658,9 @@ if __name__ == '__main__':
             print()
             all_results["dfr_train_results"] = dfr_train_results
 
-        elif expr == "blreg":  # Bayesian Linear Regression on Labels
-            print("Bayesian Linear Regression on Labels")
-            blreg_results = {}
+        elif expr == "blreg_on_val":  # Bayesian Linear Regression on Labels
+            print("Bayesian Linear Regression on Labels on validation")
+            results = {}
             hyper_options = map(
                 BayesianHyperParams._make,
                 product(BL_PRECISION_OPTIONS, BL_NOISE_PRECISION_OPTIONS,
@@ -673,19 +673,53 @@ if __name__ == '__main__':
                         add_train=False),
                 n_groups, scaler=scaler,
                 ece_ratio=.5)
-            blreg_results["best_hypers"] = hyper
+            results["best_hypers"] = hyper
             print("Hypers:", hyper)
-            blreg_results.update(bayesian_linear_regression_eval(
+            results.update(bayesian_linear_regression_eval(
                 hyper,
                 partial(get_val_set, all_embeddings, all_y, all_g, n_groups,
                         group_balance=True,
                         add_train=False, random_selection=True),
                 partial(get_split, "test", all_embeddings, all_y, all_g),
                 n_groups, scaler))
-            print("Bayesian Linear Regression on Labels results:")
-            print(json.dumps(blreg_results, indent=INDENT))
+            print("Bayesian Linear Regression on Labels on validation results:")
+            print(json.dumps(results, indent=INDENT))
             print()
-            all_results["blreg_results"] = blreg_results
+            all_results["blreg_on_val_results"] = results
+
+        elif expr == "blreg_on_unbalanced_train":  # Bayesian Linear Regression on unbalanced subsampled train
+            n_train = len(all_embeddings["train"])
+            max_n = int(n_train * args.train_frac)
+            expr_desc = f"Bayesian Linear Regression on Labels on unbalanced train ({args.train_frac:.2%}={max_n}/{n_train})"
+            print(expr_desc)
+            results = {}
+            hyper_options = map(
+                BayesianHyperParams._make,
+                product(BL_PRECISION_OPTIONS, BL_NOISE_PRECISION_OPTIONS,
+                        BL_INTERCEPT_SCALING_OPTIONS)
+            )
+            hyper = bayesian_linear_regression_tune(
+                hyper_options,
+                partial(get_train_val_set, all_embeddings, all_y, all_g, n_groups,
+                        group_balance=False,
+                        max_n=max_n,
+                        random_selection=True),
+                n_groups, scaler=scaler,
+                ece_ratio=.5)
+            results["best_hypers"] = hyper
+            print("Hypers:", hyper)
+            results.update(bayesian_linear_regression_eval(
+                hyper,
+                partial(get_split, "train", all_embeddings, all_y, all_g, n_groups,
+                        group_balance=False,
+                        max_n=max_n,
+                        random_selection=True),
+                partial(get_split, "test", all_embeddings, all_y, all_g),
+                n_groups, scaler))
+            print(expr_desc+" results:")
+            print(json.dumps(results, indent=INDENT))
+            print()
+            all_results["blreg_on_unbalanced_train_results"] = results
 
         args.result_path.parent.mkdir(parents=True, exist_ok=True)
         with open(args.result_path, 'w') as f:
