@@ -35,7 +35,7 @@ CLASS_WEIGHT_OPTIONS = (
     [(1., w) for w in CLASS_WEIGHT_OPTIONS] +
     [(w, 1.) for w in CLASS_WEIGHT_OPTIONS if w != 1.])
 DEFAULT_CLASS_WEIGHT = [(1., 1.)]
-INTERCEPT_SCALING_OPTIONS = [0.1, 0.3, 1., 3., 10.][2:3]
+INTERCEPT_SCALING_OPTIONS = [1., 10., 30., 100.]
 
 
 class HyperParams(
@@ -70,6 +70,14 @@ def build_argparser():
         help="Path to save results")
     parser.add_argument(
         "--ckpt_path", type=Path, default=None, help="Checkpoint path")
+    parser.add_argument(
+        "--expr", type=str, nargs="*",
+        choices=["base", "on_val", "on_train"],
+        default=["base", "on_val", "on_train"],
+        help="Experiments to run")
+    parser.add_argument(
+        "--train_frac", type=float, default=1.,
+        help="Fraction of train set to subsample")
     parser.add_argument(
         "--batch_size", type=int, default=100, required=False,
         help="Batch size")
@@ -391,30 +399,7 @@ if __name__ == '__main__':
     model.cuda()
     model.eval()
 
-    # Evaluate model
-    print("Base Model")
-    get_yp_func = partial(get_y_p, n_places=trainset.n_places)
-    base_model_results = {}
-    for split, loader in loaders.items():
-        results, logits = evaluate(model, loader, get_yp_func, return_logits=True)
-        y, g = loader.dataset.y_array, loader.dataset.group_array
-        conf, acc = get_conf_acc(logits, y)
-        mean_accuracy = acc.mean()
-        np.testing.assert_approx_equal(mean_accuracy, results["mean_accuracy"])
-        ece = get_ece(conf, acc)
-        group_eces = [
-            get_ece(conf[g == g_id], acc[g == g_id])
-            for g_id in range(n_groups)]
-        results["calibration"] = {
-            "ece": ece,
-            "group_eces": group_eces,
-        }
-        base_model_results[split] = results
-    print("Base Model results:")
-    print(json.dumps(base_model_results, indent=INDENT))
-    print()
-
-    model.eval()
+    all_results = {}
 
     # Extract embeddings
     def get_embed(m, x):
@@ -455,74 +440,95 @@ if __name__ == '__main__':
     # Hyperparams options
     penalty_options = [args.penalty] if args.penalty != "tune" else PENALTY_OPTIONS
 
-    # DFR on validation
-    print("DFR on validation")
-    dfr_val_results = {}
-    learn_class_weights = not(args.balance_dfr_val and args.notrain_dfr_val)
-    class_weight_options = (
-        CLASS_WEIGHT_OPTIONS if learn_class_weights else
-        DEFAULT_CLASS_WEIGHT)
-    hyper_options = map(
-        HyperParams._make,
-        product(penalty_options, C_OPTIONS, INTERCEPT_SCALING_OPTIONS,
-                class_weight_options),
-    )
-    hyper = dfr_tune(
-        hyper_options,
-        partial(split_val_set, all_embeddings, all_y, all_g, n_groups,
-                group_balance=args.balance_dfr_val,
-                add_train=not args.notrain_dfr_val),
-        n_groups)
-    dfr_val_results["best_hypers"] = hyper
-    print("Hypers:", hyper)
-    dfr_val_results.update(dfr_eval(
-        hyper,
-        partial(get_val_set, all_embeddings, all_y, all_g, n_groups,
-                group_balance=args.balance_dfr_val,
-                add_train=not args.notrain_dfr_val, random_selection=True),
-        partial(get_split, "test", all_embeddings, all_y, all_g),
-        n_groups, scaler))
-    print("DFR on validation results:")
-    print(json.dumps(dfr_val_results, indent=INDENT))
-    print()
+    for expr in args.expr:
+        if expr == "base":  # Evaluate base model
+            print("Base Model")
+            get_yp_func = partial(get_y_p, n_places=trainset.n_places)
+            base_model_results = {}
+            for split, loader in loaders.items():
+                results, logits = evaluate(model, loader, get_yp_func, return_logits=True)
+                y, g = loader.dataset.y_array, loader.dataset.group_array
+                conf, acc = get_conf_acc(logits, y)
+                mean_accuracy = acc.mean()
+                np.testing.assert_approx_equal(mean_accuracy, results["mean_accuracy"])
+                ece = get_ece(conf, acc)
+                group_eces = [
+                    get_ece(conf[g == g_id], acc[g == g_id])
+                    for g_id in range(n_groups)]
+                results["calibration"] = {
+                    "ece": ece,
+                    "group_eces": group_eces,
+                }
+                base_model_results[split] = results
+            model.eval()
+            print("Base Model results:")
+            print(json.dumps(base_model_results, indent=INDENT))
+            print()
+            all_results["base_model_results"] = base_model_results
 
-    # DFR on train subsampled
-    print("DFR on train subsampled")
-    dfr_train_results = {}
-    learn_class_weights = args.tune_class_weights_dfr_train
-    class_weight_options = (
-        CLASS_WEIGHT_OPTIONS if learn_class_weights else
-        DEFAULT_CLASS_WEIGHT)
-    hyper_options = map(
-        HyperParams._make,
-        product(penalty_options, C_OPTIONS, INTERCEPT_SCALING_OPTIONS,
-                class_weight_options),
-    )
-    hyper = dfr_tune(
-        hyper_options,
-        partial(get_train_val_set, all_embeddings, all_y, all_g, n_groups,
-                group_balance=True),
-        n_groups, scaler=scaler,
-        logreg_kwargs=dict(solver="liblinear", max_iter=20))
-    dfr_train_results["best_hypers"] = hyper
-    print("Hypers:", hyper)
-    dfr_train_results.update(dfr_eval(
-        hyper,
-        partial(get_split, "train", all_embeddings, all_y, all_g, n_groups,
-                group_balance=True),
-        partial(get_split, "test", all_embeddings, all_y, all_g),
-        n_groups, scaler))
-    print("DFR on train subsampled results:")
-    print(json.dumps(dfr_train_results, indent=INDENT))
-    print()
+        elif expr == "on_val":  # DFR on validation
+            print("DFR on validation")
+            dfr_val_results = {}
+            learn_class_weights = not(args.balance_dfr_val and args.notrain_dfr_val)
+            class_weight_options = (
+                CLASS_WEIGHT_OPTIONS if learn_class_weights else
+                DEFAULT_CLASS_WEIGHT)
+            hyper_options = map(
+                HyperParams._make,
+                product(penalty_options, C_OPTIONS, INTERCEPT_SCALING_OPTIONS,
+                        class_weight_options),
+            )
+            hyper = dfr_tune(
+                hyper_options,
+                partial(split_val_set, all_embeddings, all_y, all_g, n_groups,
+                        group_balance=args.balance_dfr_val,
+                        add_train=not args.notrain_dfr_val),
+                n_groups)
+            dfr_val_results["best_hypers"] = hyper
+            print("Hypers:", hyper)
+            dfr_val_results.update(dfr_eval(
+                hyper,
+                partial(get_val_set, all_embeddings, all_y, all_g, n_groups,
+                        group_balance=args.balance_dfr_val,
+                        add_train=not args.notrain_dfr_val, random_selection=True),
+                partial(get_split, "test", all_embeddings, all_y, all_g),
+                n_groups, scaler))
+            print("DFR on validation results:")
+            print(json.dumps(dfr_val_results, indent=INDENT))
+            print()
+            all_results["dfr_val_results"] = dfr_val_results
 
+        elif expr == "on_train":  # DFR on train subsampled
+            print("DFR on train subsampled")
+            dfr_train_results = {}
+            learn_class_weights = args.tune_class_weights_dfr_train
+            class_weight_options = (
+                CLASS_WEIGHT_OPTIONS if learn_class_weights else
+                DEFAULT_CLASS_WEIGHT)
+            hyper_options = map(
+                HyperParams._make,
+                product(penalty_options, C_OPTIONS, INTERCEPT_SCALING_OPTIONS,
+                        class_weight_options),
+            )
+            hyper = dfr_tune(
+                hyper_options,
+                partial(get_train_val_set, all_embeddings, all_y, all_g, n_groups,
+                        group_balance=True),
+                n_groups, scaler=scaler,
+                logreg_kwargs=dict(solver="liblinear", max_iter=20))
+            dfr_train_results["best_hypers"] = hyper
+            print("Hypers:", hyper)
+            dfr_train_results.update(dfr_eval(
+                hyper,
+                partial(get_split, "train", all_embeddings, all_y, all_g, n_groups,
+                        group_balance=True),
+                partial(get_split, "test", all_embeddings, all_y, all_g),
+                n_groups, scaler))
+            print("DFR on train subsampled results:")
+            print(json.dumps(dfr_train_results, indent=INDENT))
+            print()
+            all_results["dfr_train_results"] = dfr_train_results
 
-    all_results = {
-        "base_model_results": base_model_results,
-        "dfr_val_results": dfr_val_results,
-        "dfr_train_results": dfr_train_results,
-    }
-
-    args.result_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(args.result_path, 'w') as f:
-        json.dump(all_results, f, indent=INDENT)
+        args.result_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.result_path, 'w') as f:
+            json.dump(all_results, f, indent=INDENT)
