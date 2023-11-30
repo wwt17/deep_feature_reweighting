@@ -73,7 +73,7 @@ def build_argparser():
         "--ckpt_path", type=Path, default=None, help="Checkpoint path")
     parser.add_argument(
         "--expr", type=str, nargs="*",
-        choices=["base", "on_val", "on_train"],
+        choices=["base", "on_val", "on_train", "on_unbalanced_train"],
         default=["base", "on_val", "on_train"],
         help="Experiments to run")
     parser.add_argument(
@@ -531,6 +531,40 @@ if __name__ == '__main__':
             print(json.dumps(dfr_train_results, indent=INDENT))
             print()
             all_results["dfr_train_results"] = dfr_train_results
+
+        elif expr == "on_unbalanced_train":  # DFR on unbalanced subsampled train
+            n_train = len(all_embeddings["train"])
+            max_n = int(n_train * args.train_frac)
+            expr_desc = f"DFR on unbalanced train ({args.train_frac:.2%}={max_n}/{n_train})"
+            print(expr_desc)
+            results = {}
+            hyper_options = map(
+                HyperParams._make,
+                product(penalty_options, C_OPTIONS, INTERCEPT_SCALING_OPTIONS,
+                        class_weight_options),
+            )
+            hyper = dfr_tune(
+                hyper_options,
+                partial(get_train_val_set, all_embeddings, all_y, all_g, n_groups,
+                        group_balance=False,
+                        max_n=max_n,
+                        random_selection=True),
+                n_groups, scaler=scaler,
+                logreg_kwargs=dict(solver="liblinear", max_iter=20))
+            results["best_hypers"] = hyper
+            print("Hypers:", hyper)
+            results.update(dfr_eval(
+                hyper,
+                partial(get_split, "train", all_embeddings, all_y, all_g, n_groups,
+                        group_balance=False,
+                        max_n=max_n,
+                        random_selection=True),
+                partial(get_split, "test", all_embeddings, all_y, all_g),
+                n_groups, scaler))
+            print(expr_desc+" results:")
+            print(json.dumps(results, indent=INDENT))
+            print()
+            all_results["unbalanced_train_results"] = results
 
         args.result_path.parent.mkdir(parents=True, exist_ok=True)
         with open(args.result_path, 'w') as f:
