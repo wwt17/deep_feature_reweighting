@@ -445,33 +445,33 @@ if __name__ == '__main__':
 
     for expr in args.expr:
         if expr == "base":  # Evaluate base model
-            print("Base Model")
+            expr_desc = "Base Model"
+            print(expr_desc)
+            results_name = "base_model_results"
             get_yp_func = partial(get_y_p, n_places=trainset.n_places)
-            base_model_results = {}
+            results = {}
             for split, loader in loaders.items():
-                results, logits = evaluate(model, loader, get_yp_func, return_logits=True)
+                split_results, logits = evaluate(model, loader, get_yp_func, return_logits=True)
                 y, g = loader.dataset.y_array, loader.dataset.group_array
                 conf, acc = get_conf_acc(logits, y)
                 mean_accuracy = acc.mean()
-                np.testing.assert_approx_equal(mean_accuracy, results["mean_accuracy"])
+                np.testing.assert_approx_equal(mean_accuracy, split_results["mean_accuracy"])
                 ece = get_ece(conf, acc)
                 group_eces = [
                     get_ece(conf[g == g_id], acc[g == g_id])
                     for g_id in range(n_groups)]
-                results["calibration"] = {
+                split_results["calibration"] = {
                     "ece": ece,
                     "group_eces": group_eces,
                 }
-                base_model_results[split] = results
+                results[split] = split_results
             model.eval()
-            print("Base Model results:")
-            print(json.dumps(base_model_results, indent=INDENT))
-            print()
-            all_results["base_model_results"] = base_model_results
 
         elif expr == "on_val":  # DFR on validation
-            print("DFR on validation")
-            dfr_val_results = {}
+            expr_desc = "DFR on validation"
+            print(expr_desc)
+            results_name = "dfr_val_results"
+            results = {}
             learn_class_weights = not(args.balance_dfr_val and args.notrain_dfr_val)
             class_weight_options = (
                 CLASS_WEIGHT_OPTIONS if learn_class_weights else
@@ -487,23 +487,21 @@ if __name__ == '__main__':
                         group_balance=args.balance_dfr_val,
                         add_train=not args.notrain_dfr_val),
                 n_groups)
-            dfr_val_results["best_hypers"] = hyper
+            results["best_hypers"] = hyper
             print("Hypers:", hyper)
-            dfr_val_results.update(dfr_eval(
+            results.update(dfr_eval(
                 hyper,
                 partial(get_val_set, all_embeddings, all_y, all_g, n_groups,
                         group_balance=args.balance_dfr_val,
                         add_train=not args.notrain_dfr_val, random_selection=True),
                 partial(get_split, "test", all_embeddings, all_y, all_g),
                 n_groups, scaler))
-            print("DFR on validation results:")
-            print(json.dumps(dfr_val_results, indent=INDENT))
-            print()
-            all_results["dfr_val_results"] = dfr_val_results
 
         elif expr == "on_train":  # DFR on train subsampled
-            print("DFR on train subsampled")
-            dfr_train_results = {}
+            expr_desc = "DFR on train subsampled"
+            print(expr_desc)
+            results_name = "dfr_train_results"
+            results = {}
             learn_class_weights = args.tune_class_weights_dfr_train
             class_weight_options = (
                 CLASS_WEIGHT_OPTIONS if learn_class_weights else
@@ -519,24 +517,21 @@ if __name__ == '__main__':
                         group_balance=True),
                 n_groups, scaler=scaler,
                 logreg_kwargs=dict(solver="liblinear", max_iter=20))
-            dfr_train_results["best_hypers"] = hyper
+            results["best_hypers"] = hyper
             print("Hypers:", hyper)
-            dfr_train_results.update(dfr_eval(
+            results.update(dfr_eval(
                 hyper,
                 partial(get_split, "train", all_embeddings, all_y, all_g, n_groups,
                         group_balance=True),
                 partial(get_split, "test", all_embeddings, all_y, all_g),
                 n_groups, scaler))
-            print("DFR on train subsampled results:")
-            print(json.dumps(dfr_train_results, indent=INDENT))
-            print()
-            all_results["dfr_train_results"] = dfr_train_results
 
         elif expr == "on_unbalanced_train":  # DFR on unbalanced subsampled train
             n_train = len(all_embeddings["train"])
             max_n = int(n_train * args.train_frac)
             expr_desc = f"DFR on unbalanced train ({args.train_frac:.2%}={max_n}/{n_train})"
             print(expr_desc)
+            results_name = "unbalanced_train_results"
             results = {}
             hyper_options = map(
                 HyperParams._make,
@@ -561,10 +556,11 @@ if __name__ == '__main__':
                         random_selection=True),
                 partial(get_split, "test", all_embeddings, all_y, all_g),
                 n_groups, scaler))
-            print(expr_desc+" results:")
-            print(json.dumps(results, indent=INDENT))
-            print()
-            all_results["unbalanced_train_results"] = results
+
+        print(expr_desc+" results:")
+        print(json.dumps(results, indent=INDENT))
+        print()
+        all_results[results_name] = results
 
         args.result_path.parent.mkdir(parents=True, exist_ok=True)
         with open(args.result_path, 'w') as f:
