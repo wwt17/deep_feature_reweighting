@@ -531,7 +531,7 @@ if __name__ == '__main__':
             max_n = int(n_train * args.train_frac)
             expr_desc = f"DFR on unbalanced train ({args.train_frac:.2%}={max_n}/{n_train})"
             print(expr_desc)
-            results_name = "unbalanced_train_results"
+            results_name = "dfr_unbalanced_train_results"
             results = {}
             hyper_options = map(
                 HyperParams._make,
