@@ -690,7 +690,7 @@ if __name__ == '__main__':
         elif expr == "blreg_on_val":  # Bayesian Linear Regression on Labels
             expr_desc = "Bayesian Linear Regression on Labels on validation"
             print(expr_desc)
-            results_name = "unbalanced_train_results"
+            results_name = "blreg_on_val_results"
             results = {}
             hyper_options = map(
                 BayesianHyperParams._make,
