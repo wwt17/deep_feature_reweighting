@@ -19,7 +19,7 @@ class BayesianLinearRegression:
     """Bayesian Linear Regression model. Follows Bishop 3.3.
     """
     def __init__(
-            self, d, mean=None, precision=1., noise_precision=10.,
+            self, d, mean=None, precision=1., noise_precision=None,
             intercept_scaling=0.
     ):
         """
@@ -28,7 +28,8 @@ class BayesianLinearRegression:
             mean: m_0, prior mean
             precision: S_0^{-1}, prior covariance; If given as a scalar,
                 interpret the scalar as the alpha and the precision is alpha I
-            noise_precision: beta, the noise precision
+            noise_precision: beta, the noise precision; If None, must give
+                heteroskedastic noise when calling the fit method.
             intercept_scaling: features phi becomes [phi, intercept_scaling],
                 i.e., a "synthetic" feature with constant value equal to
                 intercept_scaling is appended to represent the bias term. Note
@@ -51,16 +52,23 @@ class BayesianLinearRegression:
         self.precision = precision
         self.noise_precision = noise_precision
 
-    def fit(self, Phi, y):
+    def fit(self, Phi, y, noise_precision=None):
         """Update the posteriors by observing data.
         Args:
             Phi: design matrix, float array of shape (n, d)
-            y: target labels, int array of shape (n,)
+            y: targets, float array of shape (n,)
+            noise_precision (optional): noise. float array of shape (n,) for
+                heteroskedastic noise; float scalar for homoskedastic noise.
+                None for self.noise_precision.
         """
         if self.with_bias:
             Phi = append_intercept_scaling(Phi, self.intercept_scaling)
-        pos_precision = self.precision + self.noise_precision * (Phi.T @ Phi)
-        pos_mean = solve(pos_precision, self.precision @ self.mean + self.noise_precision * (Phi.T @ y))
+        if noise_precision is None:
+            noise_precision = self.noise_precision
+        pos_precision = self.precision + Phi.T * noise_precision @ Phi
+        pos_mean = solve(
+            pos_precision,
+            self.precision @ self.mean + Phi.T @ (noise_precision * y))
         self.mean, self.precision = pos_mean, pos_precision
 
     def predictive_distribution(self, phi):
@@ -78,7 +86,9 @@ class BayesianLinearRegression:
         def _get_epistemic_variance(phi_x):
             #return phi_x @ solve((c, low), phi_x)
             return phi_x @ covariance @ phi_x
-        pred_variance = 1. / self.noise_precision + np.apply_along_axis(_get_epistemic_variance, -1, phi)
+        pred_variance = np.apply_along_axis(_get_epistemic_variance, -1, phi)
+        if self.noise_precision is not None:
+            pred_variance += 1. / self.noise_precision
         pred_mean = np.dot(phi, self.mean)
         pred_mean, pred_variance = torch.tensor(pred_mean), torch.tensor(pred_variance)
         return torch.distributions.normal.Normal(pred_mean, torch.sqrt(pred_variance))
