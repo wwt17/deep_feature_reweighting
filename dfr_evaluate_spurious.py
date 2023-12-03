@@ -221,6 +221,12 @@ def split_val_set(all_embeddings, all_y, all_g, n_groups, n_val=None, group_bala
     return (x_train, y_train, g_train), (x_val, y_val, g_val)
 
 
+def build_logistic_regression_model(
+        hypers, logreg_kwargs=dict(solver="liblinear")):
+    return LogisticRegression(
+        **hypers.to_kwargs(), **logreg_kwargs)
+
+
 def get_conf_acc(logits, target):
     probs = sp.special.softmax(logits, axis=-1)
     pred_ = np.argmax(probs, axis=-1, keepdims=True)
@@ -260,14 +266,17 @@ def evaluate_on_dataset(
     Args:
         pred_probs: predicted probabilities of shape (n, n_classes)
         dataset: (x, y, g)
+        with_ece: bool, whether to compute ECE. If False, returned
+            ece, group_eces will both be None
+        n_bins: int, number of bins in computing ECE
+        verbose: bool, whether to print evaluation information
     Returns:
-        preds, corrects, group_accs
+        preds, corrects, group_accs, ece, group_eces
     """
     x, y, g = dataset
     preds = pred_probs.argmax(axis=-1)
     corrects = preds == y
     group_accs = [corrects[g == g_id].mean() for g_id in range(n_groups)]
-    ret = preds, corrects, group_accs
 
     if with_ece:
         conf = np.take_along_axis(pred_probs, np.expand_dims(preds, axis=-1), axis=-1).squeeze(axis=-1)  # confidence
@@ -276,23 +285,63 @@ def evaluate_on_dataset(
             get_ece(conf[g == g_id], corrects[g == g_id], n_bins=n_bins,
                     verbose=verbose)
             for g_id in range(n_groups)]
-        ret += (ece, group_eces)
+    else:
+        ece, group_eces = None, None
 
-    return ret
+    return preds, corrects, group_accs, ece, group_eces
 
 
-def dfr_tune(
-        hyper_options, get_datasets, n_groups, scaler="train", num_retrains=1,
-        logreg_kwargs=dict(solver="liblinear")):
+def worst_group_objective(val_preds, corrects, group_accs, ece=None, group_eces=None, ece_ratio=0.):
     """
+    Args:
+        ece_ratio: optimization objective is minimizing
+            (1-ece_ratio) * worst_group_err + ece_ratio * worst_group_ece
+    Returns:
+        objective, info_str
+    """
+    group_accs = np.array(group_accs)
+    worst_group_acc = np.min(group_accs)
+    worst_group_err = 1 - worst_group_acc
+    if group_eces is not None:
+        worst_group_ece = np.max(group_eces)
+    else:
+        worst_group_ece = 0.
+    objective = (1-ece_ratio) * worst_group_err + ece_ratio * worst_group_ece
+
+    info_str = f"accs={group_accs} worst={worst_group_acc:.4f}"
+    if ece is not None:
+        info_str += f" {ece=:.4f}"
+    if group_eces is not None:
+        info_str += f" worst={worst_group_ece:.4f}"
+    info_str += f" obj={objective:.4f}"
+
+    return objective, info_str
+
+
+def tune(
+        hyper_options, get_datasets, n_groups, scaler="train", num_retrains=1,
+        build_model=build_logistic_regression_model,
+        objective=worst_group_objective,
+        with_ece=False,
+        verbose=False):
+    """Tune hyperparameters of the model to minimize the objective.
     Args:
         hyper_options: iterable of HyperParams, hyper-parameter options to try.
         get_datasets: callable to get train and val sets.
         n_groups: int, number of groups
         scaler: If set to "train", fit the train set each time from get_datasets. None for no preprocessing.
-        logreg_kwargs: kwargs passed to LogisticRegression
+        num_retrains: int, number of calls to get_datasets()
+        build_model: Callable, model(hypers) builds the model with hypers.
+            model.fit(x_train, y_train) train the model, and
+            model.predict_proba(x_val) returns predictive probabilities over
+            classes on x_val.
+        objective: Callable, objective(*eval_result) returns
+            objective, info_str which are the objective value and the
+            infomation string to print.
+        with_ece: bool, whether to compute ECE.
+        verbose: bool, whether to print evaluation information.
     """
-    worst_accs = defaultdict(float)
+    objectives = defaultdict(float)
     for i in range(num_retrains):
         (x_train, y_train, g_train), (x_val, y_val, g_val) = get_datasets()
         print(f"train group sizes: {np.bincount(g_train)}")
@@ -306,20 +355,39 @@ def dfr_tune(
             x_val = _scaler.transform(x_val)
 
         for hypers in hyper_options:
-            logreg = LogisticRegression(
-                **hypers.to_kwargs(), **logreg_kwargs)
-            logreg.fit(x_train, y_train)
-            val_pred_probs = logreg.predict_proba(x_val)
-            val_preds, corrects, group_accs = evaluate_on_dataset(
-                val_pred_probs, (x_val, y_val, g_val), n_groups)
-            group_accs = np.array(group_accs)
-            worst_acc = np.min(group_accs)
-            worst_accs[hypers] += worst_acc
-            print(f"{hypers} {worst_acc=:.4f} {group_accs=}")
+            model = build_model(hypers)
+            model.fit(x_train, y_train)
+            val_pred_probs = model.predict_proba(x_val)
+            eval_result = evaluate_on_dataset(
+                val_pred_probs, (x_val, y_val, g_val), n_groups,
+                with_ece=with_ece, verbose=verbose)
+            obj, info_str = objective(*eval_result)
+            objectives[hypers] += obj
+            print(f"{hypers} {info_str}")
 
-    ks, vs = list(worst_accs.keys()), list(worst_accs.values())
-    best_hypers = ks[np.argmax(vs)]
+    ks, vs = list(objectives.keys()), list(objectives.values())
+    best_hypers = ks[np.argmin(vs)]
     return best_hypers
+
+
+def eval(model, datasets, verbose=True):
+    results = {}
+    for split, dataset in datasets.items():
+        x, y, g = dataset
+        pred_probs = model.predict_proba(x)
+        preds, corrects, group_accs, ece, group_eces = evaluate_on_dataset(
+            pred_probs, dataset, n_groups, with_ece=True, verbose=verbose)
+        mean_acc = corrects.mean()
+        worst_group_acc = np.min(group_accs)
+        results[split] = {
+            "mean_acc": mean_acc,
+            "group_accs": group_accs,
+            "worst_group_acc": worst_group_acc,
+            "ece": ece,
+            "group_eces": group_eces,
+        }
+
+    return results
 
 
 def print_logreg(logreg):
@@ -343,8 +411,8 @@ def dfr_eval(
         if scaler is not None:
             x_train = scaler.transform(x_train)
 
-        logreg = LogisticRegression(
-            **hypers.to_kwargs(), **logreg_kwargs)
+        logreg = build_logistic_regression_model(
+            hypers, logreg_kwargs=logreg_kwargs)
         logreg.fit(x_train, y_train)
 
         coefs.append(logreg.coef_)
@@ -358,8 +426,8 @@ def dfr_eval(
     if scaler is not None:
         x_test = scaler.transform(x_test)
 
-    logreg = LogisticRegression(
-        **hypers.to_kwargs(), **logreg_kwargs)
+    logreg = build_logistic_regression_model(
+        hypers, logreg_kwargs=logreg_kwargs)
     n_classes = np.max(y_train) + 1
     # the fit is only needed to set up logreg
     logreg.fit(x_train[:n_classes], np.arange(n_classes))
@@ -373,23 +441,7 @@ def dfr_eval(
         "test": (x_test, y_test, g_test),
         "train": (x_train, y_train, g_train),
     }
-    results = {}
-    for split, dataset in datasets.items():
-        x, y, g = dataset
-        pred_probs = logreg.predict_proba(x)
-        preds, corrects, group_accs, ece, group_eces = evaluate_on_dataset(
-            pred_probs, dataset, n_groups, with_ece=True, verbose=verbose)
-        mean_acc = corrects.mean()
-        worst_group_acc = np.min(group_accs)
-        results[split] = {
-            "mean_acc": mean_acc,
-            "group_accs": group_accs,
-            "worst_group_acc": worst_group_acc,
-            "ece": ece,
-            "group_eces": group_eces,
-        }
-
-    return results
+    return eval(logreg, datasets, verbose=verbose)
 
 
 def bayesian_linear_regression_pred_probs(blreg, x):
@@ -611,21 +663,31 @@ if __name__ == '__main__':
                 product(penalty_options, C_OPTIONS, INTERCEPT_SCALING_OPTIONS,
                         class_weight_options),
             )
-            hyper = dfr_tune(
+            hyper = tune(
                 hyper_options,
-                partial(split_val_set, all_embeddings, all_y, all_g, n_groups,
-                        group_balance=args.balance_dfr_val,
-                        add_train=not args.notrain_dfr_val),
-                n_groups)
+                partial(
+                    split_val_set, all_embeddings, all_y, all_g, n_groups,
+                    group_balance=args.balance_dfr_val,
+                    add_train=not args.notrain_dfr_val
+                ),
+                n_groups,
+                build_model=build_logistic_regression_model
+            )
             results["best_hypers"] = hyper
             print("Hypers:", hyper)
             results.update(dfr_eval(
                 hyper,
-                partial(get_val_set, all_embeddings, all_y, all_g, n_groups,
-                        group_balance=args.balance_dfr_val,
-                        add_train=not args.notrain_dfr_val, random_selection=True),
-                partial(get_split, "test", all_embeddings, all_y, all_g),
-                n_groups, scaler))
+                partial(
+                    get_val_set,
+                    all_embeddings, all_y, all_g, n_groups,
+                    group_balance=args.balance_dfr_val,
+                    add_train=not args.notrain_dfr_val, random_selection=True
+                ),
+                partial(
+                    get_split, "test", all_embeddings, all_y, all_g
+                ),
+                n_groups, scaler
+            ))
 
         elif expr == "on_train":  # DFR on train subsampled
             expr_desc = "DFR on train subsampled"
@@ -641,20 +703,32 @@ if __name__ == '__main__':
                 product(penalty_options, C_OPTIONS, INTERCEPT_SCALING_OPTIONS,
                         class_weight_options),
             )
-            hyper = dfr_tune(
+            hyper = tune(
                 hyper_options,
-                partial(get_train_val_set, all_embeddings, all_y, all_g, n_groups,
-                        group_balance=True),
+                partial(
+                    get_train_val_set,
+                    all_embeddings, all_y, all_g, n_groups,
+                    group_balance=True
+                ),
                 n_groups, scaler=scaler,
-                logreg_kwargs=dict(solver="liblinear", max_iter=20))
+                build_model=partial(
+                    build_logistic_regression_model,
+                    logreg_kwargs=dict(solver="liblinear", max_iter=20)
+                )
+            )
             results["best_hypers"] = hyper
             print("Hypers:", hyper)
             results.update(dfr_eval(
                 hyper,
-                partial(get_split, "train", all_embeddings, all_y, all_g, n_groups,
-                        group_balance=True),
-                partial(get_split, "test", all_embeddings, all_y, all_g),
-                n_groups, scaler))
+                partial(
+                    get_split, "train", all_embeddings, all_y, all_g, n_groups,
+                    group_balance=True
+                ),
+                partial(
+                    get_split, "test", all_embeddings, all_y, all_g
+                ),
+                n_groups, scaler
+            ))
 
         elif expr == "on_unbalanced_train":  # DFR on unbalanced subsampled train
             n_train = len(all_embeddings["train"])
@@ -668,24 +742,36 @@ if __name__ == '__main__':
                 product(penalty_options, C_OPTIONS, INTERCEPT_SCALING_OPTIONS,
                         class_weight_options),
             )
-            hyper = dfr_tune(
+            hyper = tune(
                 hyper_options,
-                partial(get_train_val_set, all_embeddings, all_y, all_g, n_groups,
-                        group_balance=False,
-                        max_n=max_n,
-                        random_selection=True),
+                partial(
+                    get_train_val_set,
+                    all_embeddings, all_y, all_g, n_groups,
+                    group_balance=False,
+                    max_n=max_n,
+                    random_selection=True
+                ),
                 n_groups, scaler=scaler,
-                logreg_kwargs=dict(solver="liblinear", max_iter=20))
+                build_model=partial(
+                    build_logistic_regression_model,
+                    logreg_kwargs=dict(solver="liblinear", max_iter=20)
+                )
+            )
             results["best_hypers"] = hyper
             print("Hypers:", hyper)
             results.update(dfr_eval(
                 hyper,
-                partial(get_split, "train", all_embeddings, all_y, all_g, n_groups,
-                        group_balance=False,
-                        max_n=max_n,
-                        random_selection=True),
-                partial(get_split, "test", all_embeddings, all_y, all_g),
-                n_groups, scaler))
+                partial(
+                    get_split, "train", all_embeddings, all_y, all_g, n_groups,
+                    group_balance=False,
+                    max_n=max_n,
+                    random_selection=True
+                ),
+                partial(
+                    get_split, "test", all_embeddings, all_y, all_g
+                ),
+                n_groups, scaler
+            ))
 
         elif expr == "blreg_on_val":  # Bayesian Linear Regression on Labels
             expr_desc = "Bayesian Linear Regression on Labels on validation"
