@@ -222,7 +222,7 @@ def split_val_set(all_embeddings, all_y, all_g, n_groups, n_val=None, group_bala
 
 
 def build_logistic_regression_model(
-        hypers, logreg_kwargs=dict(solver="liblinear")):
+        hypers, d, logreg_kwargs=dict(solver="liblinear")):
     return LogisticRegression(
         **hypers.to_kwargs(), **logreg_kwargs)
 
@@ -331,7 +331,8 @@ def tune(
         n_groups: int, number of groups
         scaler: If set to "train", fit the train set each time from get_datasets. None for no preprocessing.
         num_retrains: int, number of calls to get_datasets()
-        build_model: Callable, model(hypers) builds the model with hypers.
+        build_model: Callable, model(hypers, d) builds the model with hypers
+            and dimension d.
             model.fit(x_train, y_train) train the model, and
             model.predict_proba(x_val) returns predictive probabilities over
             classes on x_val.
@@ -355,7 +356,7 @@ def tune(
             x_val = _scaler.transform(x_val)
 
         for hypers in hyper_options:
-            model = build_model(hypers)
+            model = build_model(hypers, x_train.shape[-1])
             model.fit(x_train, y_train)
             val_pred_probs = model.predict_proba(x_val)
             eval_result = evaluate_on_dataset(
