@@ -114,5 +114,84 @@ class LabelRegressionModel:
         pred_dist = self.regression_model.predictive_distribution(x)
         pred_prob0 = pred_dist.cdf(torch.zeros_like(pred_dist.mean))
         pred_prob1 = 1 - pred_prob0
-        pred_probs = np.column_stack((pred_prob0, pred_prob1))
-        return pred_probs
+        pred_probs = torch.stack((pred_prob0, pred_prob1), dim=-1)
+        return pred_probs.detach().cpu().numpy()
+
+
+class DirichletObservationModel:
+    """Dirichlet Observation Model, which does Bayesian Linear Regression in
+    the logit space. (Milios et al. Dirichlet-based gaussian processes for 
+    large-scale calibrated classification. NeurIPS 2018)
+    """
+    def __init__(
+            self, num_classes, d, mean=None, precision=1.,
+            noise_precision=None, intercept_scaling=0.
+    ):
+        """Mostly same arguments as BayesianLinearRegression.
+        Args:
+            n_classes: int, number of classes
+        """
+        self.num_classes = num_classes
+        self.regression_models = [
+            BayesianLinearRegression(
+                d, mean=mean, precision=precision,
+                noise_precision=noise_precision,
+                intercept_scaling=intercept_scaling,
+            )
+            for k in range(self.num_classes)
+        ]
+
+    def _transform_targets(self, targets, alpha_epsilon=0.01):
+        alpha = np.full(targets.shape + (self.num_classes,), alpha_epsilon)
+        np.put_along_axis(
+            alpha,
+            np.expand_dims(targets, -1), alpha_epsilon + 1.,
+            -1)
+        sigma2 = np.log(np.reciprocal(alpha) + 1.)
+        transformed_targets = np.log(alpha) - 0.5 * sigma2
+        return transformed_targets, sigma2
+
+    def fit(self, x, y, alpha_epsilon=0.01):
+        """Update the posteriors by observing data.
+        Args:
+            x: design matrix, float array of shape (n, d)
+            y: target class labels, int array of shape (n,)
+            alpha_epsilon: alpha_epsilon in the model
+        """
+        transformed_targets, sigma2 = self._transform_targets(
+            y, alpha_epsilon=alpha_epsilon)
+        noise_precision = np.reciprocal(sigma2)
+        for k in range(self.num_classes):
+            regression_model = self.regression_models[k]
+            regression_model.fit(
+                x,
+                transformed_targets[..., k],
+                noise_precision=noise_precision[..., k]
+            )
+
+    def predictive_distribution(self, x, n_samples):
+        """Predictive distribution on test points x.
+        Args:
+            x: features of test points.
+            n_samples: int, number of samples for estimating the probs.
+        Returns:
+            predictive_distribution: Categorical(prob_sample_mean)
+        """
+        reg_pred_dists = [
+            regression_model.predictive_distribution(x)
+            for regression_model in self.regression_models
+        ]
+        logit_samples = torch.stack(
+            [
+                pred_dist.sample(sample_shape=torch.Size([n_samples]))
+                for pred_dist in reg_pred_dists
+            ],
+            dim=-1
+        )
+        prob_samples = logit_samples.softmax(dim=-1)
+        prob_sample_mean = prob_samples.mean(dim=0)
+        return torch.distributions.categorical.Categorical(prob_sample_mean)
+
+    def predict_proba(self, x, n_samples=25):
+        pred_dist = self.predictive_distribution(x, n_samples)
+        return pred_dist.probs.detach().cpu().numpy()

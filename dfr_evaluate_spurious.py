@@ -21,7 +21,7 @@ from sklearn.preprocessing import StandardScaler
 
 from wb_data import WaterBirdsDataset, get_loader, get_transform_cub, log_data
 from utils import Logger, AverageMeter, set_seed, evaluate, get_y_p
-from bayesian_models import LabelRegressionModel
+from bayesian_models import LabelRegressionModel, DirichletObservationModel
 
 
 OPTION_SET_NAME = "WaterBirds"
@@ -94,7 +94,7 @@ def build_argparser():
         "--ckpt_path", type=Path, default=None, help="Checkpoint path")
     parser.add_argument(
         "--expr", type=str, nargs="*",
-        choices=["base", "on_val", "on_train", "on_unbalanced_train", "blreg_on_val", "blreg_on_unbalanced_train"],
+        choices=["base", "on_val", "on_train", "on_unbalanced_train", "blreg_on_val", "blreg_on_unbalanced_train", "dir_on_val"],
         default=["base", "on_val", "on_train"],
         help="Experiments to run")
     parser.add_argument(
@@ -229,6 +229,10 @@ def build_logistic_regression_model(
 
 def build_label_regression_model(hypers, d):
     return LabelRegressionModel(d, **hypers.to_kwargs())
+
+
+def build_dirichlet_observation_model(hypers, d, num_classes=2):
+    return DirichletObservationModel(num_classes, d, **hypers.to_kwargs())
 
 
 def get_conf_acc(logits, target):
@@ -449,15 +453,16 @@ def dfr_eval(
     return eval(logreg, datasets, verbose=verbose)
 
 
-def label_regression_eval(
+def train_once_eval(
         hypers, get_train_dataset, get_eval_dataset, n_groups, scaler,
+        build_model=build_label_regression_model,
         verbose=True):
     x_train, y_train, g_train = get_train_dataset()
     print(f"train group sizes: {np.bincount(g_train)}")
     if scaler is not None:
         x_train = scaler.transform(x_train)
 
-    model = build_label_regression_model(hypers, x_train.shape[-1])
+    model = build_model(hypers, x_train.shape[-1])
     model.fit(x_train, y_train)
 
     x_test, y_test, g_test = get_eval_dataset()
@@ -731,7 +736,7 @@ if __name__ == '__main__':
             )
             results["best_hypers"] = hyper
             print("Hypers:", hyper)
-            results.update(label_regression_eval(
+            results.update(train_once_eval(
                 hyper,
                 partial(
                     get_val_set, all_embeddings, all_y, all_g, n_groups,
@@ -742,7 +747,8 @@ if __name__ == '__main__':
                 partial(
                     get_split, "test", all_embeddings, all_y, all_g
                 ),
-                n_groups, scaler
+                n_groups, scaler,
+                build_model=build_label_regression_model,
             ))
 
         elif expr == "blreg_on_unbalanced_train":  # Bayesian Linear Regression on unbalanced subsampled train
@@ -773,7 +779,7 @@ if __name__ == '__main__':
             )
             results["best_hypers"] = hyper
             print("Hypers:", hyper)
-            results.update(label_regression_eval(
+            results.update(train_once_eval(
                 hyper,
                 partial(
                     get_split, "train", all_embeddings, all_y, all_g, n_groups,
@@ -784,7 +790,48 @@ if __name__ == '__main__':
                 partial(
                     get_split, "test", all_embeddings, all_y, all_g
                 ),
-                n_groups, scaler
+                n_groups, scaler,
+                build_model=build_label_regression_model,
+            ))
+
+        elif expr == "dir_on_val":  # Dirichlet model
+            expr_desc = "Dirichlet Observation Model on validation"
+            print(expr_desc)
+            results_name = "dir_on_val_results"
+            results = {}
+            hyper_options = map(
+                BayesianHyperParams._make,
+                product(BL_PRECISION_OPTIONS, BL_NOISE_PRECISION_OPTIONS,
+                        [0.])
+            )
+            hyper = tune(
+                hyper_options,
+                partial(
+                    split_val_set, all_embeddings, all_y, all_g, n_groups,
+                    group_balance=True,
+                    add_train=False
+                ),
+                n_groups,
+                scaler=scaler,
+                build_model=build_dirichlet_observation_model,
+                objective=partial(worst_group_objective, ece_ratio=.5),
+                with_ece=True,
+            )
+            results["best_hypers"] = hyper
+            print("Hypers:", hyper)
+            results.update(train_once_eval(
+                hyper,
+                partial(
+                    get_val_set, all_embeddings, all_y, all_g, n_groups,
+                    group_balance=True,
+                    add_train=False,
+                    random_selection=True
+                ),
+                partial(
+                    get_split, "test", all_embeddings, all_y, all_g
+                ),
+                n_groups, scaler,
+                build_model=build_dirichlet_observation_model,
             ))
 
         print(expr_desc+" results:")
