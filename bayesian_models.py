@@ -91,3 +91,28 @@ class BayesianLinearRegression:
         pred_mean = np.dot(phi, self.mean)
         pred_mean, pred_variance = torch.tensor(pred_mean), torch.tensor(pred_variance)
         return torch.distributions.normal.Normal(pred_mean, torch.sqrt(pred_variance))
+
+
+class LabelRegressionModel:
+    """Direct linear regression labels. Same as BayesianLinearRegression, but
+    encapsulates the transformation between {0, 1} and {-1, +1}.
+    """
+    def __init__(
+            self, d, mean=None, precision=1., noise_precision=None,
+            intercept_scaling=0.
+    ):
+        self.regression_model = BayesianLinearRegression(
+            d, mean=mean, precision=precision, noise_precision=noise_precision,
+            intercept_scaling=intercept_scaling,
+        )
+
+    def fit(self, x, y, noise_precision=None):
+        return self.regression_model.fit(
+            x, y * 2 - 1, noise_precision=noise_precision)
+    
+    def predict_proba(self, x):
+        pred_dist = self.regression_model.predictive_distribution(x)
+        pred_prob0 = pred_dist.cdf(torch.zeros_like(pred_dist.mean))
+        pred_prob1 = 1 - pred_prob0
+        pred_probs = np.column_stack((pred_prob0, pred_prob1))
+        return pred_probs
