@@ -222,7 +222,7 @@ def split_val_set(all_embeddings, all_y, all_g, n_groups, n_val=None, group_bala
 
 
 def build_logistic_regression_model(
-        hypers, d, logreg_kwargs=dict(solver="liblinear")):
+        hypers, d=None, logreg_kwargs=dict(solver="liblinear")):
     return LogisticRegression(
         **hypers.to_kwargs(), **logreg_kwargs)
 
