@@ -76,8 +76,7 @@ class BayesianLinearRegression:
         Args:
             phi: phi(x), features of test points.
         Returns:
-            pred_mean, pred_variance: the predictive distribution is
-                Normal(pred_mean, pred_variance)
+            predictive_distribution: Normal(pred_mean, pred_variance)
         """
         if self.with_bias:
             phi = append_intercept_scaling(phi, self.intercept_scaling)
