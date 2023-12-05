@@ -36,7 +36,7 @@ CLASS_WEIGHT_OPTIONS = (
     [(1., w) for w in CLASS_WEIGHT_OPTIONS] +
     [(w, 1.) for w in CLASS_WEIGHT_OPTIONS if w != 1.])
 DEFAULT_CLASS_WEIGHT = [(1., 1.)]
-INTERCEPT_SCALING_OPTIONS = [1., 10., 30., 100.]
+INTERCEPT_SCALING_OPTIONS = [.1, 1., 10., 30., 100.]
 
 
 class HyperParams(
