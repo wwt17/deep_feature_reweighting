@@ -632,7 +632,7 @@ if __name__ == '__main__':
                 HyperParams._make,
                 product(penalty_options, options["C"],
                         options["intercept_scaling"] if False else [1.],  # reduce time
-                        class_weight_options),
+                        options["class_weight"]),
             )
             hyper = tune(
                 hyper_options,
