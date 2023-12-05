@@ -60,7 +60,7 @@ class HyperParams(
 
 BL_PRECISION_OPTIONS = [300., 1000., 3000.]
 BL_NOISE_PRECISION_OPTIONS = [10., 30., 100., 300.]
-BL_INTERCEPT_SCALING_OPTIONS = [100.]
+BL_INTERCEPT_SCALING_OPTIONS = [1., 10., 100.]
 
 
 class BayesianHyperParams(
@@ -94,7 +94,7 @@ def build_argparser():
         "--ckpt_path", type=Path, default=None, help="Checkpoint path")
     parser.add_argument(
         "--expr", type=str, nargs="*",
-        choices=["base", "on_val", "on_train", "on_unbalanced_train", "blreg_on_val", "blreg_on_unbalanced_train", "dir_on_val"],
+        choices=["base", "on_val", "on_train", "on_unbalanced_train", "blreg_on_val", "blreg_on_unbalanced_train", "dir_on_val", "dir_on_unbalanced_train"],
         default=["base", "on_val", "on_train"],
         help="Experiments to run")
     parser.add_argument(
@@ -802,7 +802,7 @@ if __name__ == '__main__':
             hyper_options = map(
                 BayesianHyperParams._make,
                 product(BL_PRECISION_OPTIONS, BL_NOISE_PRECISION_OPTIONS,
-                        [0.])
+                        BL_INTERCEPT_SCALING_OPTIONS)
             )
             hyper = tune(
                 hyper_options,
@@ -825,6 +825,49 @@ if __name__ == '__main__':
                     get_val_set, all_embeddings, all_y, all_g, n_groups,
                     group_balance=True,
                     add_train=False,
+                    random_selection=True
+                ),
+                partial(
+                    get_split, "test", all_embeddings, all_y, all_g
+                ),
+                n_groups, scaler,
+                build_model=build_dirichlet_observation_model,
+            ))
+
+        elif expr == "dir_on_unbalanced_train":  # Dirichlet model on unbalanced subsampled train
+            n_train = len(all_embeddings["train"])
+            max_n = int(n_train * args.train_frac)
+            expr_desc = f"Dirichlet Observation Model on Labels on unbalanced train ({args.train_frac:.2%}={max_n}/{n_train})"
+            print(expr_desc)
+            results_name = "dir_on_unbalanced_train_results"
+            results = {}
+            hyper_options = map(
+                BayesianHyperParams._make,
+                product(BL_PRECISION_OPTIONS, BL_NOISE_PRECISION_OPTIONS,
+                        BL_INTERCEPT_SCALING_OPTIONS)
+            )
+            hyper = tune(
+                hyper_options,
+                partial(
+                    get_train_val_set, all_embeddings, all_y, all_g, n_groups,
+                    group_balance=False,
+                    max_n=max_n,
+                    random_selection=True
+                ),
+                n_groups,
+                scaler=scaler,
+                build_model=build_dirichlet_observation_model,
+                objective=partial(worst_group_objective, ece_ratio=.5),
+                with_ece=True,
+            )
+            results["best_hypers"] = hyper
+            print("Hypers:", hyper)
+            results.update(train_once_eval(
+                hyper,
+                partial(
+                    get_split, "train", all_embeddings, all_y, all_g, n_groups,
+                    group_balance=False,
+                    max_n=max_n,
                     random_selection=True
                 ),
                 partial(
