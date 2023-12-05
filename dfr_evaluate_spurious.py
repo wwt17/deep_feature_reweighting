@@ -23,19 +23,36 @@ from wb_data import WaterBirdsDataset, get_loader, get_transform_cub, log_data
 from utils import Logger, AverageMeter, set_seed, evaluate, get_y_p
 
 
-OPTION_SET_NAME = "WaterBirds"
+def reciprocal_class_weights(class_weights):
+    class_weights = sorted(class_weights)
+    return (
+        [(w, 1.) for w in reversed(class_weights)] +
+        [(1., w) for w in class_weights if w != 1.]
+    )
+
+
 PENALTY_OPTIONS = ["l1", "l2"][:1]
-if OPTION_SET_NAME == "WaterBirds":
-    C_OPTIONS = [1., 0.7, 0.3, 0.1, 0.07, 0.03, 0.01]
-    CLASS_WEIGHT_OPTIONS = [1., 2., 3., 10., 100., 300., 1000.]
-elif OPTION_SET_NAME == "CelebA":
-    C_OPTIONS = [3., 1., 0.3, 0.1, 0.03, 0.01, 0.003]
-    CLASS_WEIGHT_OPTIONS = [1., 2., 3., 10., 100., 300., 500.]
-CLASS_WEIGHT_OPTIONS = (
-    [(1., w) for w in CLASS_WEIGHT_OPTIONS] +
-    [(w, 1.) for w in CLASS_WEIGHT_OPTIONS if w != 1.])
+DATASET_OPTIONS = {
+    "waterbird": {
+        "C": [1., 0.7, 0.3, 0.1, 0.07, 0.03, 0.01],
+        "intercept_scaling": [1., 10., 30., 100.],
+        "class_weight": reciprocal_class_weights([1., 2., 3., 10., 100., 300., 1000.]),
+    },
+    "celeba": {
+        "C": [3., 1., 0.3, 0.1, 0.03, 0.01, 0.003],
+        "intercept_scaling": [1., 10., 30., 100.],
+        "class_weight": [(1., w) for w in [1., 2., 3., 10., 100., 300., 500.]],
+    },
+}
 DEFAULT_CLASS_WEIGHT = [(1., 1.)]
-INTERCEPT_SCALING_OPTIONS = [1., 10., 30., 100.]
+
+
+def get_dataset_name(data_dir):
+    data_dir = str(data_dir)
+    for dataset_name in DATASET_OPTIONS.keys():
+        if dataset_name in data_dir:
+            return dataset_name
+    return None
 
 
 class HyperParams(
@@ -495,6 +512,7 @@ if __name__ == '__main__':
 
     # Hyperparams options
     penalty_options = [args.penalty] if args.penalty != "tune" else PENALTY_OPTIONS
+    options = DATASET_OPTIONS[get_dataset_name(args.data_dir)]
 
     for expr in args.expr:
         if expr == "base":  # Evaluate base model
@@ -527,11 +545,12 @@ if __name__ == '__main__':
             results = {}
             learn_class_weights = not(args.balance_dfr_val and args.notrain_dfr_val)
             class_weight_options = (
-                CLASS_WEIGHT_OPTIONS if learn_class_weights else
+                options["class_weight"] if learn_class_weights else
                 DEFAULT_CLASS_WEIGHT)
             hyper_options = map(
                 HyperParams._make,
-                product(penalty_options, C_OPTIONS, INTERCEPT_SCALING_OPTIONS,
+                product(penalty_options, options["C"],
+                        options["intercept_scaling"],
                         class_weight_options),
             )
             hyper = tune(
@@ -567,11 +586,12 @@ if __name__ == '__main__':
             results = {}
             learn_class_weights = args.tune_class_weights_dfr_train
             class_weight_options = (
-                CLASS_WEIGHT_OPTIONS if learn_class_weights else
+                options["class_weight"] if learn_class_weights else
                 DEFAULT_CLASS_WEIGHT)
             hyper_options = map(
                 HyperParams._make,
-                product(penalty_options, C_OPTIONS, INTERCEPT_SCALING_OPTIONS,
+                product(penalty_options, options["C"],
+                        options["intercept_scaling"],
                         class_weight_options),
             )
             hyper = tune(
@@ -610,7 +630,8 @@ if __name__ == '__main__':
             results = {}
             hyper_options = map(
                 HyperParams._make,
-                product(penalty_options, C_OPTIONS, INTERCEPT_SCALING_OPTIONS,
+                product(penalty_options, options["C"],
+                        options["intercept_scaling"] if False else [1.],  # reduce time
                         class_weight_options),
             )
             hyper = tune(
