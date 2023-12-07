@@ -631,10 +631,23 @@ if __name__ == '__main__':
                 conf, acc = get_conf_acc(logits, y)
                 mean_accuracy = acc.mean()
                 np.testing.assert_approx_equal(mean_accuracy, split_results["mean_accuracy"])
+
+                base_result_path = result_path/expr/split
+                plotting = base_result_path is not None
+                if plotting:  # plot
+                    n_cols = 2
+                    n_rows = get_n_rows(n_groups, n_cols)
+                    fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_rows * 4, n_cols * 4), squeeze=False)
+                    group_axs = list(chain.from_iterable(axs))
                 ece = get_ece(conf, acc)
                 group_eces = [
-                    get_ece(conf[g == g_id], acc[g == g_id])
+                    get_ece(conf[g == g_id], acc[g == g_id],
+                            ax=(group_axs[g_id] if plotting else None))
                     for g_id in range(n_groups)]
+                if plotting:
+                    base_result_path.mkdir(parents=True, exist_ok=True)
+                    plt.savefig(base_result_path/"group_calibration.png")
+
                 split_results["calibration"] = {
                     "ece": ece,
                     "group_eces": group_eces,
