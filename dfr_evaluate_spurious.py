@@ -1,5 +1,7 @@
 """Evaluate DFR on spurious correlations datasets."""
 
+from typing import Optional
+
 import torch
 import torchvision
 from torch.utils.tensorboard import SummaryWriter
@@ -14,13 +16,19 @@ from pathlib import Path
 from collections import defaultdict, namedtuple
 import json
 from functools import partial
-from itertools import product
+from itertools import product, chain
+import matplotlib
+import matplotlib.pyplot as plt
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 from wb_data import WaterBirdsDataset, get_loader, get_transform_cub, log_data
 from utils import Logger, AverageMeter, set_seed, evaluate, get_y_p
+
+
+def get_n_rows(n, n_cols):
+    return (n - 1) // n_cols + 1
 
 
 def reciprocal_class_weights(class_weights):
@@ -232,7 +240,7 @@ def get_conf_acc(logits, target):
     return conf, acc
 
 
-def get_ece(conf, acc, n_bins=10, verbose=True):
+def get_ece(conf, acc, n_bins=10, conf_low=.5, verbose=True, ax: Optional[matplotlib.axes.Axes] = None):
     assert len(conf) == len(acc)
     assert np.all((conf > 0) & (conf <= 1))
     bin_counts = np.ndarray((n_bins,), dtype=int)
@@ -246,18 +254,32 @@ def get_ece(conf, acc, n_bins=10, verbose=True):
         sum_acc[i_bin] = acc[subsamples].sum()
     sum_overconf = sum_conf - sum_acc
     ece = np.abs(sum_overconf).sum() / len(conf)
+
+    bin_low = int(conf_low * n_bins)
+    overconf = sum_overconf / bin_counts
     if verbose:
         print(f"ECE={ece:.4f}")
-        overconf = sum_overconf / bin_counts
-        bin_low = n_bins // 2
         print("bin_counts=" + " ".join(map("{:6d}".format, bin_counts[bin_low:])))
         print("  overconf=" + " ".join(map("{:6.3f}".format, overconf[bin_low:])))
+    if ax is not None:
+        mean_acc = sum_acc / bin_counts
+        width = 1 / n_bins
+        bin_centers = np.linspace(0, 1 - width, n_bins) + .5 * width
+        acc_bar = ax.bar(bin_centers[bin_low:], mean_acc[bin_low:], width=width, alpha=1.0, color="blue")
+        overconf_bar = ax.bar(bin_centers[bin_low:], overconf[bin_low:], bottom=mean_acc[bin_low:], width=width, color="red", alpha=0.5, hatch='//', edgecolor='r')
+        ax.axline((0, 0), slope=1, linestyle="--", color="gray")
+        ax.legend([acc_bar, overconf_bar], ["Outputs", "Gap"], loc="best")
+        ax.set_xlabel("Confidence")
+        ax.set_ylabel("Accuracy")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+
     return ece
 
 
 def evaluate_on_dataset(
         pred_probs, dataset, n_groups, with_ece=False, n_bins=10,
-        verbose=True):
+        verbose=True, result_path=None):
     """Evaluate model on dataset.
     Args:
         pred_probs: predicted probabilities of shape (n, n_classes)
@@ -276,11 +298,20 @@ def evaluate_on_dataset(
 
     if with_ece:
         conf = np.take_along_axis(pred_probs, np.expand_dims(preds, axis=-1), axis=-1).squeeze(axis=-1)  # confidence
+        plotting = result_path is not None
+        if plotting:  # plot
+            n_cols = 2
+            n_rows = get_n_rows(n_groups, n_cols)
+            fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_rows * 4, n_cols * 4), squeeze=False)
+            group_axs = list(chain.from_iterable(axs))
         ece = get_ece(conf, corrects, n_bins=n_bins, verbose=verbose)
         group_eces = [
             get_ece(conf[g == g_id], corrects[g == g_id], n_bins=n_bins,
-                    verbose=verbose)
+                    verbose=verbose, ax=(group_axs[g_id] if plotting else None))
             for g_id in range(n_groups)]
+        if plotting:
+            result_path.mkdir(parents=True, exist_ok=True)
+            plt.savefig(result_path/"group_calibration.png")
     else:
         ece, group_eces = None, None
 
@@ -367,13 +398,14 @@ def tune(
     return best_hypers
 
 
-def eval(model, datasets, verbose=True):
+def eval(model, datasets, verbose=True, result_path=None):
     results = {}
     for split, dataset in datasets.items():
         x, y, g = dataset
         pred_probs = model.predict_proba(x)
         preds, corrects, group_accs, ece, group_eces = evaluate_on_dataset(
-            pred_probs, dataset, n_groups, with_ece=True, verbose=verbose)
+            pred_probs, dataset, n_groups, with_ece=True, verbose=verbose,
+            result_path=(result_path/split if result_path is not None else None))
         mean_acc = corrects.mean()
         worst_group_acc = np.min(group_accs)
         results[split] = {
@@ -391,7 +423,8 @@ def dfr_eval(
         hypers, get_train_dataset, get_eval_dataset, n_groups, scaler,
         num_retrains=20,
         logreg_kwargs=dict(solver="liblinear"),
-        verbose=True):
+        verbose=True,
+        result_path=None):
     coefs, intercepts = [], []
 
     for i in range(num_retrains):
@@ -424,7 +457,7 @@ def dfr_eval(
         "test": (x_test, y_test, g_test),
         "train": (x_train, y_train, g_train),
     }
-    return eval(logreg, datasets, verbose=verbose)
+    return eval(logreg, datasets, verbose=verbose, result_path=result_path)
 
 
 if __name__ == '__main__':
@@ -514,6 +547,9 @@ if __name__ == '__main__':
     penalty_options = [args.penalty] if args.penalty != "tune" else PENALTY_OPTIONS
     options = DATASET_OPTIONS[get_dataset_name(args.data_dir)]
 
+    result_path = args.result_path.parent
+    result_path.mkdir(parents=True, exist_ok=True)
+
     for expr in args.expr:
         if expr == "base":  # Evaluate base model
             expr_desc = "Base Model"
@@ -576,7 +612,8 @@ if __name__ == '__main__':
                 partial(
                     get_split, "test", all_embeddings, all_y, all_g
                 ),
-                n_groups, scaler
+                n_groups, scaler,
+                result_path=result_path/expr,
             ))
 
         elif expr == "on_train":  # DFR on train subsampled
@@ -618,7 +655,8 @@ if __name__ == '__main__':
                 partial(
                     get_split, "test", all_embeddings, all_y, all_g
                 ),
-                n_groups, scaler
+                n_groups, scaler,
+                result_path=result_path/expr,
             ))
 
         elif expr == "on_unbalanced_train":  # DFR on unbalanced subsampled train
@@ -662,7 +700,8 @@ if __name__ == '__main__':
                 partial(
                     get_split, "test", all_embeddings, all_y, all_g
                 ),
-                n_groups, scaler
+                n_groups, scaler,
+                result_path=result_path/expr,
             ))
 
         print(expr_desc+" results:")
@@ -670,6 +709,5 @@ if __name__ == '__main__':
         print()
         all_results[results_name] = results
 
-        args.result_path.parent.mkdir(parents=True, exist_ok=True)
         with open(args.result_path, 'w') as f:
             json.dump(all_results, f, indent=INDENT)
