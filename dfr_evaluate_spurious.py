@@ -506,7 +506,8 @@ def dfr_eval(
 def train_once_eval(
         hypers, get_train_dataset, get_eval_dataset, n_groups, scaler,
         build_model=build_label_regression_model,
-        verbose=True):
+        verbose=True,
+        result_path=None):
     x_train, y_train, g_train = get_train_dataset()
     print(f"train group sizes: {np.bincount(g_train)}")
     if scaler is not None:
@@ -524,7 +525,7 @@ def train_once_eval(
         "test": (x_test, y_test, g_test),
         "train": (x_train, y_train, g_train),
     }
-    return eval(model, datasets, verbose=verbose)
+    return eval(model, datasets, verbose=verbose, result_path=result_path)
 
 
 if __name__ == '__main__':
@@ -809,6 +810,7 @@ if __name__ == '__main__':
                 ),
                 n_groups, scaler,
                 build_model=build_label_regression_model,
+                result_path=result_path/expr,
             ))
 
         elif expr == "blreg_on_unbalanced_train":  # Bayesian Linear Regression on unbalanced subsampled train
@@ -852,6 +854,7 @@ if __name__ == '__main__':
                 ),
                 n_groups, scaler,
                 build_model=build_label_regression_model,
+                result_path=result_path/expr,
             ))
 
         elif expr == "dir_on_val":  # Dirichlet model
@@ -892,6 +895,7 @@ if __name__ == '__main__':
                 ),
                 n_groups, scaler,
                 build_model=build_dirichlet_observation_model,
+                result_path=result_path/expr,
             ))
 
         elif expr == "dir_on_unbalanced_train":  # Dirichlet model on unbalanced subsampled train
@@ -935,6 +939,7 @@ if __name__ == '__main__':
                 ),
                 n_groups, scaler,
                 build_model=build_dirichlet_observation_model,
+                result_path=result_path/expr,
             ))
 
         print(expr_desc+" results:")
