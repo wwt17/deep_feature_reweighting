@@ -331,7 +331,7 @@ def evaluate_on_dataset(
         if plotting:  # plot
             n_cols = 2
             n_rows = get_n_rows(n_groups, n_cols)
-            fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_rows * 4, n_cols * 4), squeeze=False)
+            fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4), squeeze=False)
             group_axs = list(chain.from_iterable(axs))
         ece = get_ece(conf, corrects, n_bins=n_bins, verbose=verbose)
         group_eces = [
@@ -637,7 +637,7 @@ if __name__ == '__main__':
                 if plotting:  # plot
                     n_cols = 2
                     n_rows = get_n_rows(n_groups, n_cols)
-                    fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_rows * 4, n_cols * 4), squeeze=False)
+                    fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4), squeeze=False)
                     group_axs = list(chain.from_iterable(axs))
                 ece = get_ece(conf, acc)
                 group_eces = [
