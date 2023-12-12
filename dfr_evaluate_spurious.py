@@ -267,8 +267,10 @@ def get_ece(conf, acc, n_bins=10, conf_low=.5, verbose=True, ax: Optional[matplo
         bin_centers = np.linspace(0, 1 - width, n_bins) + .5 * width
         acc_bar = ax.bar(bin_centers[bin_low:], mean_acc[bin_low:], width=width, alpha=1.0, color="blue")
         overconf_bar = ax.bar(bin_centers[bin_low:], overconf[bin_low:], bottom=mean_acc[bin_low:], width=width, color="red", alpha=0.5, hatch='//', edgecolor='r')
+        dist = bin_counts / len(conf)
+        dist_bar = ax.bar(bin_centers[bin_low:], dist[bin_low:] * 0.2, width=width, color="yellow")
         ax.axline((0, 0), slope=1, linestyle="--", color="gray")
-        ax.legend([acc_bar, overconf_bar], ["Outputs", "Gap"], loc="best")
+        ax.legend([acc_bar, overconf_bar, dist_bar], ["Outputs", "Gap", "Dist."], loc="best")
         ax.set_xlabel("Confidence")
         ax.set_ylabel("Accuracy")
         ax.set_xlim(0, 1)
@@ -302,7 +304,7 @@ def evaluate_on_dataset(
         if plotting:  # plot
             n_cols = 2
             n_rows = get_n_rows(n_groups, n_cols)
-            fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4), squeeze=False)
+            fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4), squeeze=False, sharex=True, sharey=True)
             group_axs = list(chain.from_iterable(axs))
         ece = get_ece(conf, corrects, n_bins=n_bins, verbose=verbose)
         group_eces = [
@@ -569,7 +571,7 @@ if __name__ == '__main__':
                 if plotting:  # plot
                     n_cols = 2
                     n_rows = get_n_rows(n_groups, n_cols)
-                    fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4), squeeze=False)
+                    fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4), squeeze=False, sharex=True, sharey=True)
                     group_axs = list(chain.from_iterable(axs))
                 ece = get_ece(conf, acc)
                 group_eces = [
