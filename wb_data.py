@@ -1,4 +1,5 @@
 import os
+import copy
 import numpy as np
 import pandas as pd
 import torch
@@ -9,22 +10,30 @@ from torch.utils.data.sampler import WeightedRandomSampler
 
 
 class WaterBirdsDataset(Dataset):
-    def __init__(self, basedir, split="train", transform=None):
-        try:
-            split_i = ["train", "val", "test"].index(split)
-        except ValueError:
-            raise(f"Unknown split {split}")
-        metadata_df = pd.read_csv(os.path.join(basedir, "metadata.csv"))
-        print(len(metadata_df))
-        self.metadata_df = metadata_df[metadata_df["split"] == split_i]
-        print(len(self.metadata_df))
+    def __init__(self, basedir, split="train", transform=None, metadata_df=None, n_classes=None, n_places=None, embedding=None):
+        if metadata_df is None:
+            try:
+                split_i = ["train", "val", "test"].index(split)
+            except ValueError:
+                raise(f"Unknown split {split}")
+            metadata_df = pd.read_csv(os.path.join(basedir, "metadata.csv"))
+            original_size = len(metadata_df)
+            metadata_df = metadata_df[metadata_df["split"] == split_i]
+            metadata_df.reset_index(drop=True, inplace=True)
+            split_size = len(metadata_df)
+            print(f"{split} split: {split_size}/{original_size}={split_size/original_size:.2%}")
+        self.metadata_df = metadata_df
         self.basedir = basedir
         self.transform = transform
         self.y_array = self.metadata_df['y'].values
         self.p_array = self.metadata_df['place'].values
-        self.n_classes = np.unique(self.y_array).size
+        if n_classes is None:
+            n_classes = np.unique(self.y_array).size
+        self.n_classes = n_classes
         self.confounder_array = self.metadata_df['place'].values
-        self.n_places = np.unique(self.confounder_array).size
+        if n_places is None:
+            n_places = np.unique(self.confounder_array).size
+        self.n_places = n_places
         self.group_array = (self.y_array * self.n_places + self.confounder_array).astype('int')
         self.n_groups = self.n_classes * self.n_places
         self.group_counts = (
@@ -34,6 +43,34 @@ class WaterBirdsDataset(Dataset):
         self.p_counts = (
                 torch.arange(self.n_places).unsqueeze(1) == torch.from_numpy(self.p_array)).sum(1).float()
         self.filename_array = self.metadata_df['img_filename'].values
+        self.embedding = embedding
+
+    def subset(self, idx):
+        return WaterBirdsDataset(
+            self.basedir,
+            transform=self.transform,
+            metadata_df=self.metadata_df.iloc[idx].reset_index(drop=True),
+            n_classes=self.n_classes,
+            n_places=self.n_places,
+            embedding=(None if self.embedding is None else self.embedding[idx]),
+        )
+
+    def transform_embedding(self, transform):
+        dataset = copy.copy(self)
+        dataset.embedding = transform(dataset.embedding)
+        return dataset
+
+    @property
+    def y(self):
+        return self.y_array
+
+    @property
+    def p(self):
+        return self.p_array
+
+    @property
+    def g(self):
+        return self.group_array
 
     def __len__(self):
         return len(self.metadata_df)
@@ -51,6 +88,21 @@ class WaterBirdsDataset(Dataset):
         if self.transform:
             img = self.transform(img)
         return img, y, g, p
+
+
+def concatenate_datasets(*datasets):
+    return WaterBirdDataset(
+        datasets[0].basedir,
+        transform=datasets[0].transform,
+        metadata_df=pd.concat(
+            [dataset.metadata_df for dataset in datasets],
+            axis=0, ignore_index=True),
+        n_classes=datasets[0].n_classes,
+        n_places=datasets[0].n_places,
+        embedding=(
+            None if datasets[0].embedding is None else
+            np.concatenate([dataset.embedding for dataset in datasets])),
+    )
 
 
 def get_transform_cub(target_resolution, train, augment_data):

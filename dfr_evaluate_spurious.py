@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
-from wb_data import WaterBirdsDataset, get_loader, get_transform_cub, log_data
+from wb_data import WaterBirdsDataset, get_loader, get_transform_cub, log_data, concatenate_datasets
 from utils import Logger, AverageMeter, set_seed, evaluate, get_y_p
 from bayesian_models import LabelRegressionModel, DirichletObservationModel
 
@@ -146,104 +146,90 @@ def build_argparser():
     return parser
 
 
-def concatenate_datasets(*datasets):
-    return tuple(np.concatenate(field) for field in zip(*datasets))
-
-
-def group_balanced(dataset, n_groups):
-    x, y, g = dataset
-    g_idxs = [np.where(g == g_id)[0] for g_id in range(n_groups)]
+def group_balanced(dataset):
+    g_idxs = [np.where(dataset.g == g_id)[0] for g_id in range(dataset.n_groups)]
     min_g_size = np.min([len(g_idx) for g_idx in g_idxs])
     for g_idx in g_idxs:
         np.random.shuffle(g_idx)
     idx = np.concatenate([g_idx[:min_g_size] for g_idx in g_idxs])
-    return x[idx], y[idx], g[idx]
+    return dataset.subset(idx)
 
 
-def get_split(split, all_embeddings, all_y, all_g, n_groups=None, group_balance=False, max_n=None, random_selection=False):
+def process_dataset(dataset, group_balance=False, max_n=None, random_selection=False):
     """Get the original split.
-    Returns: (x_split, y_split, g_split)
+    Returns: processed_dataset
     """
-    x = all_embeddings[split]
-    y = all_y[split]
-    g = all_g[split]
-
     if max_n is not None:
         if random_selection:
-            idx = np.arange(len(x))
+            idx = np.arange(len(dataset))
             np.random.shuffle(idx)
             idx = idx[:max_n]
         else:
             idx = np.s_[:max_n]
-        x, y, g = x[idx], y[idx], g[idx]
+        dataset = dataset.subset(idx)
 
     if group_balance:
-        x, y, g = group_balanced((x, y, g), n_groups)
+        dataset = group_balanced(dataset)
 
-    return x, y, g
+    return dataset
 
 
-def get_val_set(all_embeddings, all_y, all_g, n_groups, group_balance=False, add_train=True, random_selection=True):
-    x, y, g = get_split("val", all_embeddings, all_y, all_g, n_groups, group_balance=group_balance)
+def get_val_set(datasets, group_balance=False, add_train=True, random_selection=True):
+    dataset = process_dataset(datasets["val"], group_balance=group_balance)
     if add_train:
-        x, y, g = concatenate_datasets(
-            get_split("train", all_embeddings, all_y, all_g,
-                      max_n=len(x), random_selection=random_selection),
-            (x, y, g))
-    return x, y, g
+        dataset = concatenate_datasets(
+            process_dataset(
+                datasets["train"],
+                max_n=len(dataset), random_selection=random_selection),
+            dataset)
+    return dataset
 
 
-def get_train_val_set(all_embeddings, all_y, all_g, n_groups, group_balance=False, max_n=None, random_selection=False):
+def get_train_val_set(datasets, group_balance=False, max_n=None, random_selection=False):
     """Get original train and val sets.
-    Returns: ((x_train, y_train, g_train), (x_val, y_val, g_val))
+    Returns: (train_dataset, val_dataset)
     """
     return (
-        get_split(
-            "train", all_embeddings, all_y, all_g, n_groups,
+        process_dataset(
+            datasets["train"],
             group_balance=group_balance,
             max_n=max_n,
             random_selection=random_selection),
-        get_split(
-            "val", all_embeddings, all_y, all_g, n_groups,
+        process_dataset(
+            datasets["val"],
             group_balance=False)
     )
 
 
-def split_val_set(all_embeddings, all_y, all_g, n_groups, n_val=None, group_balance=False, add_train=True):
+def split_val_set(datasets, n_val=None, group_balance=False, add_train=True):
     """Split a valtrain set from the val set and optionally merge with part of the train set.
     Args:
         n_val: Number of remaining val examples. Default: len(val_set) // 2
         group_balance: Whether to make the valtrain set group balanced.
         add_train: Whether to add part of the train set.
-    Returns: ((x_train, y_train, g_train), (x_val, y_val, g_val))
+    Returns: (train_set, val_set)
     """
-    x_val = all_embeddings["val"]
-    y_val = all_y["val"]
-    g_val = all_g["val"]
+    val_set = datasets["val"]
 
     if n_val is None:
-        n_val = len(x_val) // 2
+        n_val = len(val_set) // 2
 
     # randomly split val set
-    idx = np.arange(len(x_val))
+    idx = np.arange(len(val_set))
     np.random.shuffle(idx)
-    x_train = x_val[idx[n_val:]]
-    y_train = y_val[idx[n_val:]]
-    g_train = g_val[idx[n_val:]]
-    x_val = x_val[idx[:n_val]]
-    y_val = y_val[idx[:n_val]]
-    g_val = g_val[idx[:n_val]]
+    train_set = val_set.subset(idx[n_val:])
+    val_set = val_set.subset(idx[:n_val])
 
     if group_balance:
-        x_train, y_train, g_train = group_balanced((x_train, y_train, g_train), n_groups)
+        train_set = group_balanced(train_set)
 
     if add_train:
-        x_train, y_train, g_train = concatenate_datasets(
-            get_split("train", all_embeddings, all_y, all_g,
-                      max_n=len(x_train), random_selection=False),
-            (x_train, y_train, g_train))
+        train_set = concatenate_datasets(
+            get_split(datasets["train"],
+                      max_n=len(train_set), random_selection=False),
+            train_set)
 
-    return (x_train, y_train, g_train), (x_val, y_val, g_val)
+    return train_set, val_set
 
 
 def build_logistic_regression_model(
@@ -309,12 +295,12 @@ def get_ece(conf, acc, n_bins=10, conf_low=.5, verbose=True, ax: Optional[matplo
 
 
 def evaluate_on_dataset(
-        pred_probs, dataset, n_groups, with_ece=False, n_bins=10,
+        pred_probs, dataset, with_ece=False, n_bins=10,
         verbose=True, result_path=None):
     """Evaluate model on dataset.
     Args:
         pred_probs: predicted probabilities of shape (n, n_classes)
-        dataset: (x, y, g)
+        dataset: dataset
         with_ece: bool, whether to compute ECE. If False, returned
             ece, group_eces will both be None
         n_bins: int, number of bins in computing ECE
@@ -322,24 +308,22 @@ def evaluate_on_dataset(
     Returns:
         preds, corrects, group_accs, ece, group_eces
     """
-    x, y, g = dataset
     preds = pred_probs.argmax(axis=-1)
-    corrects = preds == y
-    group_accs = [corrects[g == g_id].mean() for g_id in range(n_groups)]
+    corrects = preds == dataset.y
+    group_accs = [corrects[dataset.g == g_id].mean() for g_id in range(dataset.n_groups)]
 
     if with_ece:
         conf = np.take_along_axis(pred_probs, np.expand_dims(preds, axis=-1), axis=-1).squeeze(axis=-1)  # confidence
         plotting = result_path is not None
         if plotting:  # plot
-            n_cols = 2
-            n_rows = get_n_rows(n_groups, n_cols)
+            n_rows, n_cols = dataset.n_classes, dataset.n_places
             fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4), squeeze=False, sharex=True, sharey=True)
             group_axs = list(chain.from_iterable(axs))
         ece = get_ece(conf, corrects, n_bins=n_bins, verbose=verbose)
         group_eces = [
-            get_ece(conf[g == g_id], corrects[g == g_id], n_bins=n_bins,
+            get_ece(conf[dataset.g == g_id], corrects[dataset.g == g_id], n_bins=n_bins,
                     verbose=verbose, ax=(group_axs[g_id] if plotting else None))
-            for g_id in range(n_groups)]
+            for g_id in range(dataset.n_groups)]
         if plotting:
             result_path.mkdir(parents=True, exist_ok=True)
             plt.savefig(result_path/"group_calibration.png")
@@ -377,7 +361,7 @@ def worst_group_objective(val_preds, corrects, group_accs, ece=None, group_eces=
 
 
 def tune(
-        hyper_options, get_datasets, n_groups, scaler="train", num_retrains=1,
+        hyper_options, get_datasets, scaler="train", num_retrains=1,
         build_model=build_logistic_regression_model,
         objective=worst_group_objective,
         with_ece=False,
@@ -386,14 +370,13 @@ def tune(
     Args:
         hyper_options: iterable of HyperParams, hyper-parameter options to try.
         get_datasets: callable to get train and val sets.
-        n_groups: int, number of groups
         scaler: If set to "train", fit the train set each time from get_datasets. None for no preprocessing.
         num_retrains: int, number of calls to get_datasets()
         build_model: Callable, model(hypers, d) builds the model with hypers
             and dimension d.
-            model.fit(x_train, y_train) train the model, and
-            model.predict_proba(x_val) returns predictive probabilities over
-            classes on x_val.
+            model.fit(train_set.embedding, train_set.y) train the model, and
+            model.predict_proba(val_set.embedding) returns predictive
+            probabilities over classes on val_set.embedding.
         objective: Callable, objective(*eval_result) returns
             objective, info_str which are the objective value and the
             infomation string to print.
@@ -402,23 +385,23 @@ def tune(
     """
     objectives = defaultdict(float)
     for i in range(num_retrains):
-        (x_train, y_train, g_train), (x_val, y_val, g_val) = get_datasets()
-        print(f"train group sizes: {np.bincount(g_train)}")
+        train_set, val_set = get_datasets()
+        print(f"train group sizes: {np.bincount(train_set.g)}")
         if scaler == "train":
             _scaler = StandardScaler()
-            _scaler.fit(x_train)
+            _scaler.fit(train_set.embedding)
         else:
             _scaler = scaler
         if _scaler is not None:
-            x_train = _scaler.transform(x_train)
-            x_val = _scaler.transform(x_val)
+            train_set = train_set.transform_embedding(_scaler.transform)
+            val_set = val_set.transform_embedding(_scaler.transform)
 
         for hypers in hyper_options:
-            model = build_model(hypers, x_train.shape[-1])
-            model.fit(x_train, y_train)
-            val_pred_probs = model.predict_proba(x_val)
+            model = build_model(hypers, train_set.embedding.shape[-1])
+            model.fit(train_set.embedding, train_set.y)
+            val_pred_probs = model.predict_proba(val_set.embedding)
             eval_result = evaluate_on_dataset(
-                val_pred_probs, (x_val, y_val, g_val), n_groups,
+                val_pred_probs, val_set,
                 with_ece=with_ece, verbose=verbose)
             obj, info_str = objective(*eval_result)
             objectives[hypers] += obj
@@ -432,10 +415,9 @@ def tune(
 def eval(model, datasets, verbose=True, result_path=None):
     results = {}
     for split, dataset in datasets.items():
-        x, y, g = dataset
-        pred_probs = model.predict_proba(x)
+        pred_probs = model.predict_proba(dataset.embedding)
         preds, corrects, group_accs, ece, group_eces = evaluate_on_dataset(
-            pred_probs, dataset, n_groups, with_ece=True, verbose=verbose,
+            pred_probs, dataset, with_ece=True, verbose=verbose,
             result_path=(result_path/split if result_path is not None else None))
         mean_acc = corrects.mean()
         worst_group_acc = np.min(group_accs)
@@ -459,7 +441,7 @@ def print_logreg(logreg):
 
 
 def dfr_eval(
-        hypers, get_train_dataset, get_eval_dataset, n_groups, scaler,
+        hypers, get_train_dataset, get_eval_dataset, scaler,
         num_retrains=20,
         logreg_kwargs=dict(solver="liblinear"),
         verbose=True,
@@ -467,14 +449,14 @@ def dfr_eval(
     coefs, intercepts = [], []
 
     for i in range(num_retrains):
-        x_train, y_train, g_train = get_train_dataset()
-        print(f"train group sizes: {np.bincount(g_train)}")
+        train_set = get_train_dataset()
+        print(f"train group sizes: {np.bincount(train_set.g)}")
         if scaler is not None:
-            x_train = scaler.transform(x_train)
+            train_set = train_set.transform_embedding(scaler.transform)
 
         logreg = build_logistic_regression_model(
             hypers, logreg_kwargs=logreg_kwargs)
-        logreg.fit(x_train, y_train)
+        logreg.fit(train_set.embedding, train_set.y)
 
         coefs.append(logreg.coef_)
         intercepts.append(logreg.intercept_)
@@ -482,16 +464,16 @@ def dfr_eval(
             print(f"logreg #{i}:")
             print_logreg(logreg)
 
-    x_test, y_test, g_test = get_eval_dataset()
-    print(f"test group sizes: {np.bincount(g_test)}")
+    test_set = get_eval_dataset()
+    print(f"test group sizes: {np.bincount(test_set.g)}")
     if scaler is not None:
-        x_test = scaler.transform(x_test)
+        test_set = test_set.transform_embedding(scaler.transform)
 
     logreg = build_logistic_regression_model(
         hypers, logreg_kwargs=logreg_kwargs)
-    n_classes = np.max(y_train) + 1
+    n_classes = train_set.n_classes
     # the fit is only needed to set up logreg
-    logreg.fit(x_train[:n_classes], np.arange(n_classes))
+    logreg.fit(train_set.embedding[:n_classes], np.arange(n_classes))
     logreg.coef_ = np.mean(coefs, axis=0)
     logreg.intercept_ = np.mean(intercepts, axis=0)
     if verbose:
@@ -499,8 +481,8 @@ def dfr_eval(
         print_logreg(logreg)
 
     datasets = {
-        "test": (x_test, y_test, g_test),
-        "train": (x_train, y_train, g_train),
+        "test": test_set,
+        "train": train_set,
     }
     return eval(logreg, datasets, verbose=verbose, result_path=result_path)
 
@@ -552,8 +534,6 @@ if __name__ == '__main__':
             basedir=args.data_dir, split=split, transform=test_transform)  # always use test_transform for evaluation
         for split in ["train", "val", "test"]
     }
-    trainset, valset, testset = datasets.values()
-    n_groups = trainset.n_groups
 
     loader_kwargs = {'batch_size': args.batch_size,
                     'num_workers': 4, 'pin_memory': True,
@@ -567,7 +547,7 @@ if __name__ == '__main__':
     }
 
     # Load model
-    n_classes = trainset.n_classes
+    n_classes = datasets["train"].n_classes
     model = torchvision.models.resnet50(weights=None)
     d = model.fc.in_features
     model.fc = torch.nn.Linear(d, n_classes)
@@ -594,24 +574,17 @@ if __name__ == '__main__':
         return x
 
 
-    all_embeddings = {}
-    all_y, all_p, all_g = {}, {}, {}
-    for name, loader in loaders.items():
-        all_embeddings[name] = []
-        all_y[name], all_p[name], all_g[name] = [], [], []
+    for split, loader in loaders.items():
+        dataset = datasets[split]
+        embedding = []
         for x, y, g, p in tqdm.tqdm(loader):
             with torch.no_grad():
-                all_embeddings[name].append(get_embed(model, x.cuda()).detach().cpu().numpy())
-                all_y[name].append(y.detach().cpu().numpy())
-                all_g[name].append(g.detach().cpu().numpy())
-                all_p[name].append(p.detach().cpu().numpy())
-        all_embeddings[name] = np.vstack(all_embeddings[name])
-        all_y[name] = np.concatenate(all_y[name])
-        all_g[name] = np.concatenate(all_g[name])
-        all_p[name] = np.concatenate(all_p[name])
+                embedding.append(get_embed(model, x.cuda()).detach().cpu().numpy())
+        embedding = np.vstack(embedding)
+        dataset.embedding = embedding
 
     scaler = StandardScaler()
-    scaler.fit(all_embeddings["train"])
+    scaler.fit(datasets["train"].embedding)
 
     # Hyperparams options
     penalty_options = [args.penalty] if args.penalty != "tune" else PENALTY_OPTIONS
@@ -625,27 +598,26 @@ if __name__ == '__main__':
             expr_desc = "Base Model"
             print(expr_desc)
             results_name = "base_model_results"
-            get_yp_func = partial(get_y_p, n_places=trainset.n_places)
+            get_yp_func = partial(get_y_p, n_places=datasets["train"].n_places)
             results = {}
             for split, loader in loaders.items():
                 split_results, logits = evaluate(model, loader, get_yp_func, return_logits=True)
-                y, g = loader.dataset.y_array, loader.dataset.group_array
-                conf, acc = get_conf_acc(logits, y)
+                dataset = loader.dataset
+                conf, acc = get_conf_acc(logits, dataset.y)
                 mean_accuracy = acc.mean()
                 np.testing.assert_approx_equal(mean_accuracy, split_results["mean_accuracy"])
 
                 base_result_path = result_path/expr/split
                 plotting = base_result_path is not None
                 if plotting:  # plot
-                    n_cols = 2
-                    n_rows = get_n_rows(n_groups, n_cols)
+                    n_rows, n_cols = dataset.n_classes, dataset.n_places
                     fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4), squeeze=False, sharex=True, sharey=True)
                     group_axs = list(chain.from_iterable(axs))
                 ece = get_ece(conf, acc)
                 group_eces = [
-                    get_ece(conf[g == g_id], acc[g == g_id],
+                    get_ece(conf[dataset.g == g_id], acc[dataset.g == g_id],
                             ax=(group_axs[g_id] if plotting else None))
-                    for g_id in range(n_groups)]
+                    for g_id in range(dataset.n_groups)]
                 if plotting:
                     base_result_path.mkdir(parents=True, exist_ok=True)
                     plt.savefig(base_result_path/"group_calibration.png")
@@ -675,11 +647,10 @@ if __name__ == '__main__':
             hyper = tune(
                 hyper_options,
                 partial(
-                    split_val_set, all_embeddings, all_y, all_g, n_groups,
+                    split_val_set, datasets,
                     group_balance=args.balance_dfr_val,
                     add_train=not args.notrain_dfr_val
                 ),
-                n_groups,
                 build_model=build_logistic_regression_model
             )
             results["best_hypers"] = hyper
@@ -688,14 +659,12 @@ if __name__ == '__main__':
                 hyper,
                 partial(
                     get_val_set,
-                    all_embeddings, all_y, all_g, n_groups,
+                    datasets,
                     group_balance=args.balance_dfr_val,
                     add_train=not args.notrain_dfr_val, random_selection=True
                 ),
-                partial(
-                    get_split, "test", all_embeddings, all_y, all_g
-                ),
-                n_groups, scaler,
+                partial(process_dataset, datasets["test"]),
+                scaler,
                 result_path=result_path/expr,
             ))
 
@@ -718,10 +687,10 @@ if __name__ == '__main__':
                 hyper_options,
                 partial(
                     get_train_val_set,
-                    all_embeddings, all_y, all_g, n_groups,
+                    datasets,
                     group_balance=True
                 ),
-                n_groups, scaler=scaler,
+                scaler=scaler,
                 build_model=partial(
                     build_logistic_regression_model,
                     logreg_kwargs=dict(solver="liblinear", max_iter=20)
@@ -731,19 +700,14 @@ if __name__ == '__main__':
             print("Hypers:", hyper)
             results.update(dfr_eval(
                 hyper,
-                partial(
-                    get_split, "train", all_embeddings, all_y, all_g, n_groups,
-                    group_balance=True
-                ),
-                partial(
-                    get_split, "test", all_embeddings, all_y, all_g
-                ),
-                n_groups, scaler,
+                partial(process_dataset, datasets["train"], group_balance=True),
+                partial(process_dataset, datasets["test"]),
+                scaler,
                 result_path=result_path/expr,
             ))
 
         elif expr == "on_unbalanced_train":  # DFR on unbalanced subsampled train
-            n_train = len(all_embeddings["train"])
+            n_train = len(datasets["train"])
             max_n = int(n_train * args.train_frac)
             expr_desc = f"DFR on unbalanced train ({args.train_frac:.2%}={max_n}/{n_train})"
             print(expr_desc)
@@ -759,12 +723,12 @@ if __name__ == '__main__':
                 hyper_options,
                 partial(
                     get_train_val_set,
-                    all_embeddings, all_y, all_g, n_groups,
+                    datasets,
                     group_balance=False,
                     max_n=max_n,
                     random_selection=True
                 ),
-                n_groups, scaler=scaler,
+                scaler=scaler,
                 build_model=partial(
                     build_logistic_regression_model,
                     logreg_kwargs=dict(solver="liblinear", max_iter=20)
@@ -775,15 +739,13 @@ if __name__ == '__main__':
             results.update(dfr_eval(
                 hyper,
                 partial(
-                    get_split, "train", all_embeddings, all_y, all_g, n_groups,
+                    process_dataset, datasets["train"],
                     group_balance=False,
                     max_n=max_n,
                     random_selection=True
                 ),
-                partial(
-                    get_split, "test", all_embeddings, all_y, all_g
-                ),
-                n_groups, scaler,
+                partial(process_dataset, datasets["test"]),
+                scaler,
                 result_path=result_path/expr,
             ))
 
