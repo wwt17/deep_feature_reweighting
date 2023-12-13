@@ -488,26 +488,26 @@ def dfr_eval(
 
 
 def train_once_eval(
-        hypers, get_train_dataset, get_eval_dataset, n_groups, scaler,
+        hypers, get_train_dataset, get_eval_dataset, scaler,
         build_model=build_label_regression_model,
         verbose=True,
         result_path=None):
-    x_train, y_train, g_train = get_train_dataset()
-    print(f"train group sizes: {np.bincount(g_train)}")
+    train_set = get_train_dataset()
+    print(f"train group sizes: {np.bincount(train_set.g)}")
     if scaler is not None:
-        x_train = scaler.transform(x_train)
+        train_set = train_set.transform_embedding(scaler.transform)
 
-    model = build_model(hypers, x_train.shape[-1])
-    model.fit(x_train, y_train)
+    model = build_model(hypers, train_set.embedding.shape[-1])
+    model.fit(train_set.embedding, train_set.y)
 
-    x_test, y_test, g_test = get_eval_dataset()
-    print(f"test group sizes: {np.bincount(g_test)}")
+    test_set = get_eval_dataset()
+    print(f"test group sizes: {np.bincount(test_set.g)}")
     if scaler is not None:
-        x_test = scaler.transform(x_test)
+        test_set = test_set.transform_embedding(scaler.transform)
 
     datasets = {
-        "test": (x_test, y_test, g_test),
-        "train": (x_train, y_train, g_train),
+        "test": test_set,
+        "train": train_set,
     }
     return eval(model, datasets, verbose=verbose, result_path=result_path)
 
@@ -762,11 +762,10 @@ if __name__ == '__main__':
             hyper = tune(
                 hyper_options,
                 partial(
-                    split_val_set, all_embeddings, all_y, all_g, n_groups,
+                    split_val_set, datasets,
                     group_balance=True,
                     add_train=False
                 ),
-                n_groups,
                 scaler=scaler,
                 build_model=build_label_regression_model,
                 objective=partial(worst_group_objective, ece_ratio=.5),
@@ -777,21 +776,19 @@ if __name__ == '__main__':
             results.update(train_once_eval(
                 hyper,
                 partial(
-                    get_val_set, all_embeddings, all_y, all_g, n_groups,
+                    get_val_set, datasets,
                     group_balance=True,
                     add_train=False,
                     random_selection=True
                 ),
-                partial(
-                    get_split, "test", all_embeddings, all_y, all_g
-                ),
-                n_groups, scaler,
+                partial(process_dataset, datasets["test"]),
+                scaler,
                 build_model=build_label_regression_model,
                 result_path=result_path/expr,
             ))
 
         elif expr == "blreg_on_unbalanced_train":  # Bayesian Linear Regression on unbalanced subsampled train
-            n_train = len(all_embeddings["train"])
+            n_train = len(datasets["train"])
             max_n = int(n_train * args.train_frac)
             expr_desc = f"Bayesian Linear Regression on Labels on unbalanced train ({args.train_frac:.2%}={max_n}/{n_train})"
             print(expr_desc)
@@ -805,12 +802,11 @@ if __name__ == '__main__':
             hyper = tune(
                 hyper_options,
                 partial(
-                    get_train_val_set, all_embeddings, all_y, all_g, n_groups,
+                    get_train_val_set, datasets,
                     group_balance=False,
                     max_n=max_n,
                     random_selection=True
                 ),
-                n_groups,
                 scaler=scaler,
                 build_model=build_label_regression_model,
                 objective=partial(worst_group_objective, ece_ratio=.5),
@@ -821,15 +817,13 @@ if __name__ == '__main__':
             results.update(train_once_eval(
                 hyper,
                 partial(
-                    get_split, "train", all_embeddings, all_y, all_g, n_groups,
+                    process_dataset, datasets["train"],
                     group_balance=False,
                     max_n=max_n,
                     random_selection=True
                 ),
-                partial(
-                    get_split, "test", all_embeddings, all_y, all_g
-                ),
-                n_groups, scaler,
+                partial(process_dataset, datasets["test"]),
+                scaler,
                 build_model=build_label_regression_model,
                 result_path=result_path/expr,
             ))
@@ -847,11 +841,10 @@ if __name__ == '__main__':
             hyper = tune(
                 hyper_options,
                 partial(
-                    split_val_set, all_embeddings, all_y, all_g, n_groups,
+                    split_val_set, datasets,
                     group_balance=True,
                     add_train=False
                 ),
-                n_groups,
                 scaler=scaler,
                 build_model=build_dirichlet_observation_model,
                 objective=partial(worst_group_objective, ece_ratio=.5),
@@ -862,21 +855,19 @@ if __name__ == '__main__':
             results.update(train_once_eval(
                 hyper,
                 partial(
-                    get_val_set, all_embeddings, all_y, all_g, n_groups,
+                    get_val_set, datasets,
                     group_balance=True,
                     add_train=False,
                     random_selection=True
                 ),
-                partial(
-                    get_split, "test", all_embeddings, all_y, all_g
-                ),
-                n_groups, scaler,
+                partial(process_dataset, datasets["test"]),
+                scaler,
                 build_model=build_dirichlet_observation_model,
                 result_path=result_path/expr,
             ))
 
         elif expr == "dir_on_unbalanced_train":  # Dirichlet model on unbalanced subsampled train
-            n_train = len(all_embeddings["train"])
+            n_train = len(datasets["train"])
             max_n = int(n_train * args.train_frac)
             expr_desc = f"Dirichlet Observation Model on Labels on unbalanced train ({args.train_frac:.2%}={max_n}/{n_train})"
             print(expr_desc)
@@ -890,12 +881,11 @@ if __name__ == '__main__':
             hyper = tune(
                 hyper_options,
                 partial(
-                    get_train_val_set, all_embeddings, all_y, all_g, n_groups,
+                    get_train_val_set, datasets,
                     group_balance=False,
                     max_n=max_n,
                     random_selection=True
                 ),
-                n_groups,
                 scaler=scaler,
                 build_model=build_dirichlet_observation_model,
                 objective=partial(worst_group_objective, ece_ratio=.5),
@@ -906,15 +896,13 @@ if __name__ == '__main__':
             results.update(train_once_eval(
                 hyper,
                 partial(
-                    get_split, "train", all_embeddings, all_y, all_g, n_groups,
+                    process_dataset, datasets["train"],
                     group_balance=False,
                     max_n=max_n,
                     random_selection=True
                 ),
-                partial(
-                    get_split, "test", all_embeddings, all_y, all_g
-                ),
-                n_groups, scaler,
+                partial(process_dataset, datasets["test"]),
+                scaler,
                 build_model=build_dirichlet_observation_model,
                 result_path=result_path/expr,
             ))
