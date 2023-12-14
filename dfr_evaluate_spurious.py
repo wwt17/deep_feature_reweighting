@@ -282,8 +282,18 @@ def get_ece(conf, acc, n_bins=10, conf_low=.5, verbose=True, ax: Optional[matplo
         bin_centers = np.linspace(0, 1 - width, n_bins) + .5 * width
         acc_bar = ax.bar(bin_centers[bin_low:], mean_acc[bin_low:], width=width, alpha=1.0, color="blue")
         overconf_bar = ax.bar(bin_centers[bin_low:], overconf[bin_low:], bottom=mean_acc[bin_low:], width=width, color="red", alpha=0.5, hatch='//', edgecolor='r')
-        dist = bin_counts / len(conf)
-        dist_bar = ax.bar(bin_centers[bin_low:], dist[bin_low:] * 0.2, width=width, color="yellow")
+
+        margin = conf * acc + (1 - conf) * (1 - acc)
+        margin_bin_counts = np.ndarray((n_bins,), dtype=int)
+        for i_bin in range(n_bins):
+            a, b = i_bin / n_bins, (i_bin + 1) / n_bins
+            if a == 0:
+                a -= 1
+            subsamples = (margin > a) & (margin <= b)
+            margin_bin_counts[i_bin] = subsamples.sum()
+        dist = margin_bin_counts / len(conf)
+        dist_bar = ax.bar(bin_centers, dist * 0.2, width=width, color="magenta")
+
         ax.axline((0, 0), slope=1, linestyle="--", color="gray")
         ax.legend([acc_bar, overconf_bar, dist_bar], ["Outputs", "Gap", "Dist."], loc="best")
         ax.set_xlabel("Confidence")
