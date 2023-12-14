@@ -142,6 +142,9 @@ def build_argparser():
         choices=["tune", "l1", "l2", "elasticnet", None], default="tune",
         help="regularization (i.e., penalty) for logistic regression.")
     parser.add_argument(
+        "--ece_ratio", type=float, default=.5, required=False,
+        help="ECE ratio (in [0, 1])")
+    parser.add_argument(
         "--seed", type=int, default=None, help="Random seed")
     return parser
 
@@ -778,7 +781,7 @@ if __name__ == '__main__':
                 ),
                 scaler=scaler,
                 build_model=build_label_regression_model,
-                objective=partial(worst_group_objective, ece_ratio=.5),
+                objective=partial(worst_group_objective, ece_ratio=args.ece_ratio),
                 with_ece=True,
             )
             results["best_hypers"] = hyper
@@ -819,7 +822,7 @@ if __name__ == '__main__':
                 ),
                 scaler=scaler,
                 build_model=build_label_regression_model,
-                objective=partial(worst_group_objective, ece_ratio=.5),
+                objective=partial(worst_group_objective, ece_ratio=args.ece_ratio),
                 with_ece=True,
             )
             results["best_hypers"] = hyper
@@ -857,7 +860,7 @@ if __name__ == '__main__':
                 ),
                 scaler=scaler,
                 build_model=build_dirichlet_observation_model,
-                objective=partial(worst_group_objective, ece_ratio=.5),
+                objective=partial(worst_group_objective, ece_ratio=args.ece_ratio),
                 with_ece=True,
             )
             results["best_hypers"] = hyper
@@ -898,7 +901,7 @@ if __name__ == '__main__':
                 ),
                 scaler=scaler,
                 build_model=build_dirichlet_observation_model,
-                objective=partial(worst_group_objective, ece_ratio=.5),
+                objective=partial(worst_group_objective, ece_ratio=args.ece_ratio),
                 with_ece=True,
             )
             results["best_hypers"] = hyper
