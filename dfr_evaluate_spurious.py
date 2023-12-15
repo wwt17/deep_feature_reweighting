@@ -503,24 +503,35 @@ if __name__ == '__main__':
 
     all_results = {}
 
+    dataset_name = get_dataset_name(args.data_dir)
+
     # Extract embeddings
     get_embed = create_feature_extractor(model, return_nodes=["flatten"])
     for split, loader in loaders.items():
         dataset = datasets[split]
-        embedding = []
-        for x, y, g, p in tqdm.tqdm(loader):
-            with torch.no_grad():
-                embedding.append(get_embed(x.cuda())["flatten"].detach())
-        embedding = torch.cat(embedding).detach()
-        dataset.torch_embedding = embedding
-        dataset.embedding = embedding.cpu().numpy()
+        embedding_path = args.ckpt_path.parent/split/"embedding.npy"
+        if embedding_path.exists():
+            print(f"loading from {embedding_path}")
+            dataset.embedding = np.load(embedding_path, allow_pickle=True)
+            dataset.torch_embedding = torch.from_numpy(dataset.embedding).cuda()
+        else:
+            embedding = []
+            for x, y, g, p in tqdm.tqdm(loader):
+                with torch.no_grad():
+                    embedding.append(get_embed(x.cuda())["flatten"].detach())
+            embedding = torch.cat(embedding).detach()
+            dataset.torch_embedding = embedding
+            dataset.embedding = embedding.cpu().numpy()
+            embedding_path.parent.mkdir(parents=True, exist_ok=True)
+            print(f"saving to {embedding_path}")
+            np.save(embedding_path, dataset.embedding)
 
     scaler = StandardScaler()
     scaler.fit(datasets["train"].embedding)
 
     # Hyperparams options
     penalty_options = [args.penalty] if args.penalty != "tune" else PENALTY_OPTIONS
-    options = DATASET_OPTIONS[get_dataset_name(args.data_dir)]
+    options = DATASET_OPTIONS[dataset_name]
 
     result_path = args.result_path.parent
     result_path.mkdir(parents=True, exist_ok=True)
