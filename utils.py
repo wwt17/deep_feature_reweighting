@@ -144,6 +144,19 @@ def evaluate(model, loader, get_yp_func, multitask=False, predict_place=False, r
     return ret[0] if len(ret) == 1 else ret
 
 
+class SoftmaxClassifier(nn.Module):
+    def __init__(self, output_layer):
+        super(SoftmaxClassifier, self).__init__()
+        self.output_layer = output_layer
+
+    def forward(self, x):
+        return self.output_layer(x)
+
+    def predict_proba(self, x):
+        logits = self(x)
+        return logits.softmax(dim=-1).detach().cpu().numpy()
+
+
 class MultiTaskHead(nn.Module):
     def __init__(self, n_features, n_classes_list):
         super(MultiTaskHead, self).__init__()

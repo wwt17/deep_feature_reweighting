@@ -25,7 +25,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 from wb_data import WaterBirdsDataset, get_loader, get_transform_cub, log_data, concatenate_datasets
-from utils import Logger, AverageMeter, set_seed, evaluate, get_y_p
+from utils import Logger, AverageMeter, set_seed, evaluate, get_y_p, SoftmaxClassifier
 
 
 def get_n_rows(n, n_cols):
@@ -102,6 +102,9 @@ def build_argparser():
         choices=["base", "on_val", "on_train", "on_unbalanced_train"],
         default=["base", "on_val", "on_train"],
         help="Experiments to run")
+    parser.add_argument(
+        "--original_base_eval", action="store_true",
+        help="Use original evaluation for the base model")
     parser.add_argument(
         "--train_frac", type=float, default=1.,
         help="Fraction of train set to subsample")
@@ -507,9 +510,10 @@ if __name__ == '__main__':
         embedding = []
         for x, y, g, p in tqdm.tqdm(loader):
             with torch.no_grad():
-                embedding.append(get_embed(x.cuda())["flatten"].detach().cpu().numpy())
-        embedding = np.vstack(embedding)
-        dataset.embedding = embedding
+                embedding.append(get_embed(x.cuda())["flatten"].detach())
+        embedding = torch.cat(embedding).detach()
+        dataset.torch_embedding = embedding
+        dataset.embedding = embedding.cpu().numpy()
 
     scaler = StandardScaler()
     scaler.fit(datasets["train"].embedding)
@@ -526,36 +530,48 @@ if __name__ == '__main__':
             expr_desc = "Base Model"
             print(expr_desc)
             results_name = "base_model_results"
-            get_yp_func = partial(get_y_p, n_places=datasets["train"].n_places)
-            results = {}
-            for split, loader in loaders.items():
-                split_results, logits = evaluate(model, loader, get_yp_func, return_logits=True)
-                dataset = loader.dataset
-                conf, acc = get_conf_acc(logits, dataset.y)
-                mean_accuracy = acc.mean()
-                np.testing.assert_approx_equal(mean_accuracy, split_results["mean_accuracy"])
 
-                base_result_path = result_path/expr/split
-                plotting = base_result_path is not None
-                if plotting:  # plot
-                    n_rows, n_cols = dataset.n_classes, dataset.n_places
-                    fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4), squeeze=False, sharex=True, sharey=True)
-                    group_axs = list(chain.from_iterable(axs))
-                ece = get_ece(conf, acc)
-                group_eces = [
-                    get_ece(conf[dataset.g == g_id], acc[dataset.g == g_id],
-                            ax=(group_axs[g_id] if plotting else None))
-                    for g_id in range(dataset.n_groups)]
-                if plotting:
-                    base_result_path.mkdir(parents=True, exist_ok=True)
-                    plt.savefig(base_result_path/"group_calibration.png")
+            if args.original_base_eval:
+                get_yp_func = partial(get_y_p, n_places=datasets["train"].n_places)
+                results = {}
+                for split, loader in loaders.items():
+                    split_results, logits = evaluate(model, loader, get_yp_func, return_logits=True)
+                    dataset = loader.dataset
+                    conf, acc = get_conf_acc(logits, dataset.y)
+                    mean_accuracy = acc.mean()
+                    np.testing.assert_approx_equal(mean_accuracy, split_results["mean_accuracy"])
 
-                split_results["calibration"] = {
-                    "ece": ece,
-                    "group_eces": group_eces,
-                }
-                results[split] = split_results
-            model.eval()
+                    base_result_path = result_path/expr/split
+                    plotting = base_result_path is not None
+                    if plotting:  # plot
+                        n_rows, n_cols = dataset.n_classes, dataset.n_places
+                        fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4), squeeze=False, sharex=True, sharey=True)
+                        group_axs = list(chain.from_iterable(axs))
+                    ece = get_ece(conf, acc)
+                    group_eces = [
+                        get_ece(conf[dataset.g == g_id], acc[dataset.g == g_id],
+                                ax=(group_axs[g_id] if plotting else None))
+                        for g_id in range(dataset.n_groups)]
+                    if plotting:
+                        base_result_path.mkdir(parents=True, exist_ok=True)
+                        plt.savefig(base_result_path/"group_calibration.png")
+
+                    split_results["calibration"] = {
+                        "ece": ece,
+                        "group_eces": group_eces,
+                    }
+                    results[split] = split_result
+                model.eval()
+
+            else:
+                classifier = SoftmaxClassifier(model.fc)
+                for dataset in datasets.values():
+                    dataset.numpy_embedding = dataset.embedding
+                    dataset.embedding = dataset.torch_embedding
+                results = eval(classifier, datasets, result_path=result_path/expr)
+                for dataset in datasets.values():
+                    dataset.embedding = dataset.numpy_embedding
+                    del dataset.numpy_embedding
 
         elif expr == "on_val":  # DFR on validation
             expr_desc = "DFR on validation"
