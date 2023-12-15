@@ -4,6 +4,7 @@ from typing import Optional
 
 import torch
 import torchvision
+from torchvision.models.feature_extraction import create_feature_extractor
 from torch.utils.tensorboard import SummaryWriter
 
 import numpy as np
@@ -500,28 +501,13 @@ if __name__ == '__main__':
     all_results = {}
 
     # Extract embeddings
-    def get_embed(m, x):
-        x = m.conv1(x)
-        x = m.bn1(x)
-        x = m.relu(x)
-        x = m.maxpool(x)
-
-        x = m.layer1(x)
-        x = m.layer2(x)
-        x = m.layer3(x)
-        x = m.layer4(x)
-
-        x = m.avgpool(x)
-        x = torch.flatten(x, 1)
-        return x
-
-
+    get_embed = create_feature_extractor(model, return_nodes=["flatten"])
     for split, loader in loaders.items():
         dataset = datasets[split]
         embedding = []
         for x, y, g, p in tqdm.tqdm(loader):
             with torch.no_grad():
-                embedding.append(get_embed(model, x.cuda()).detach().cpu().numpy())
+                embedding.append(get_embed(x.cuda())["flatten"].detach().cpu().numpy())
         embedding = np.vstack(embedding)
         dataset.embedding = embedding
 
