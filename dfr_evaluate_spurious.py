@@ -311,7 +311,7 @@ def evaluate_on_dataset(
             for g_id in range(dataset.n_groups)]
         if plotting:
             result_path.mkdir(parents=True, exist_ok=True)
-            plt.savefig(result_path/"group_calibration.png")
+            plt.savefig(result_path/"group_calibration.pdf")
     else:
         ece, group_eces = None, None
 
@@ -565,7 +565,7 @@ if __name__ == '__main__':
                         for g_id in range(dataset.n_groups)]
                     if plotting:
                         base_result_path.mkdir(parents=True, exist_ok=True)
-                        plt.savefig(base_result_path/"group_calibration.png")
+                        plt.savefig(base_result_path/"group_calibration.pdf")
 
                     split_results["calibration"] = {
                         "ece": ece,
